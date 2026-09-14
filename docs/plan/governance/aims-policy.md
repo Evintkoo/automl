@@ -11,7 +11,7 @@
 
 ## 1. Purpose
 
-This document establishes the AI Management System (AIMS) policy for Kolosal AutoML, a pure-Rust automated machine learning framework (v0.5.0). It defines the principles, governance structure, risk appetite, and review cadence that guide the responsible development, deployment, and operation of AI systems built with or managed by Kolosal AutoML.
+This document establishes the AI Management System (AIMS) policy for AutoML, a pure-Rust automated machine learning framework (v0.5.0). It defines the principles, governance structure, risk appetite, and review cadence that guide the responsible development, deployment, and operation of AI systems built with or managed by AutoML.
 
 ---
 
@@ -19,7 +19,7 @@ This document establishes the AI Management System (AIMS) policy for Kolosal Aut
 
 ### 2.1 System Description
 
-Kolosal AutoML is an open-source, high-performance AutoML framework implemented entirely in Rust. The system encompasses:
+AutoML is an open-source, high-performance AutoML framework implemented entirely in Rust. The system encompasses:
 
 - **ML Training Pipeline** -- Automated model selection and training across 17+ algorithms via `TrainEngine` and `TrainingConfig` (`src/training/`), including gradient boosting, random forests, SVMs, naive Bayes, neural architectures (TabNet, FT-Transformer), and ensemble methods (voting, stacking, blending).
 - **Hyperparameter Optimization** -- Bayesian optimization, Gaussian processes, and ASHT search via `HyperOptX`, `BayesianOptimizer`, `GaussianProcess` (`src/optimizer/`).
@@ -36,15 +36,15 @@ Kolosal AutoML is an open-source, high-performance AutoML framework implemented 
 
 This policy applies to:
 
-- All contributors to the Kolosal AutoML codebase.
-- All operators deploying Kolosal AutoML in production environments.
+- All contributors to the AutoML codebase.
+- All operators deploying AutoML in production environments.
 - All end users interacting with models trained, served, or managed by the framework.
 - Third-party integrations consuming the REST API or importing/exporting models.
 
 ### 2.3 Exclusions
 
-- Upstream Rust crate dependencies (ndarray, polars, linfa, smartcore, tokio, axum) are governed by their respective maintainers. Kolosal tracks their CVEs via supply-chain auditing (see risk register R08).
-- User-supplied datasets and external models imported into the system are the responsibility of the data owner, though Kolosal provides tooling to support responsible use.
+- Upstream Rust crate dependencies (ndarray, polars, linfa, smartcore, tokio, axum) are governed by their respective maintainers. AutoML tracks their CVEs via supply-chain auditing (see risk register R08).
+- User-supplied datasets and external models imported into the system are the responsibility of the data owner, though AutoML provides tooling to support responsible use.
 
 ---
 
@@ -52,7 +52,7 @@ This policy applies to:
 
 ### 3.1 Fairness
 
-Kolosal AutoML shall not systematically disadvantage any demographic group. Implementations must:
+AutoML shall not systematically disadvantage any demographic group. Implementations must:
 
 - Provide demographic parity and equalized odds metrics through the `ModelMetrics` framework (`src/training/models.rs`).
 - Support stratified cross-validation (`StratifiedKFold` in `CVStrategy`, `src/training/cross_validation.rs`) to ensure representative evaluation.
@@ -61,7 +61,7 @@ Kolosal AutoML shall not systematically disadvantage any demographic group. Impl
 
 ### 3.2 Transparency
 
-All AI decisions made through Kolosal AutoML shall be explainable and auditable:
+All AI decisions made through AutoML shall be explainable and auditable:
 
 - `ExperimentTracker` (`src/tracking/tracker.rs`) records all training runs, hyperparameters, metrics, and artifacts with immutable run IDs and timestamps.
 - `PermutationImportance`, `PartialDependence` (PDP/ICE), and `LocalExplainer` (SHAP-like) in `src/explainability/` provide global and local model interpretability.
@@ -79,7 +79,7 @@ Clear ownership and decision authority shall be maintained at every stage of the
 
 ### 3.4 Safety
 
-Kolosal AutoML shall include safeguards to prevent harm from AI system failures:
+AutoML shall include safeguards to prevent harm from AI system failures:
 
 - `DriftDetector` trait and implementations (`DataDriftDetector`, `ConceptDriftDetector`, `FeatureDriftMonitor`) in `src/drift/` continuously monitor for data and concept drift with configurable severity levels (0=none, 1=warning, 2=critical).
 - `AlertManager` and `AlertCondition` in `src/monitoring/alerts.rs` trigger alerts on threshold breaches.
@@ -102,21 +102,21 @@ Personal and sensitive data shall be protected throughout the AI lifecycle:
 
 ### 4.1 AI System Owner
 
-**Accountability:** Overall governance of Kolosal AutoML as an AI system.
+**Accountability:** Overall governance of AutoML as an AI system.
 
-| Responsibility | Kolosal Context |
+| Responsibility | AutoML Context |
 |---|---|
 | Approve AIMS policy and amendments | Signs off on this document and all governance updates |
 | Set organizational risk appetite | Defines acceptable risk levels in the risk register |
 | Authorize production deployments | Approves model promotion through `ModelRegistry` |
-| Ensure compliance with applicable regulations | Maps regulatory requirements to Kolosal controls |
+| Ensure compliance with applicable regulations | Maps regulatory requirements to AutoML controls |
 | Commission periodic AIMS reviews | Triggers semi-annual governance review cycle |
 
 ### 4.2 Data Steward
 
-**Accountability:** Integrity, quality, and compliance of all data flowing through Kolosal AutoML.
+**Accountability:** Integrity, quality, and compliance of all data flowing through AutoML.
 
-| Responsibility | Kolosal Context |
+| Responsibility | AutoML Context |
 |---|---|
 | Classify datasets per data classification scheme | Applies labels per `data-classification.md` |
 | Approve data ingestion via upload handlers | Reviews datasets before loading via `DataLoader` (`src/utils/data_loader.rs`) |
@@ -128,7 +128,7 @@ Personal and sensitive data shall be protected throughout the AI lifecycle:
 
 **Accountability:** Technical validation that models meet quality, fairness, and safety standards before deployment.
 
-| Responsibility | Kolosal Context |
+| Responsibility | AutoML Context |
 |---|---|
 | Review model metrics before promotion | Evaluates `ModelMetrics` (accuracy, F1, AUC-ROC, R2, RMSE) from `ExperimentTracker` |
 | Validate explainability artifacts | Reviews `PermutationImportance`, PDP, and `LocalExplanation` outputs |
@@ -139,9 +139,9 @@ Personal and sensitive data shall be protected throughout the AI lifecycle:
 
 ### 4.4 Security Officer
 
-**Accountability:** Security posture of Kolosal AutoML infrastructure and AI-specific attack surfaces.
+**Accountability:** Security posture of AutoML infrastructure and AI-specific attack surfaces.
 
-| Responsibility | Kolosal Context |
+| Responsibility | AutoML Context |
 |---|---|
 | Maintain threat model | Updates `threat-model.md` based on changes to API, UI, and training pipeline |
 | Manage API key and JWT lifecycle | Operates `ApiKeyVerifier`, `JwtVerifier`, and `SecretsManager` rotation policies |
@@ -157,7 +157,7 @@ Personal and sensitive data shall be protected throughout the AI lifecycle:
 
 ### 5.1 Risk Appetite Statement
 
-Kolosal AutoML operates with a **moderate** overall risk appetite, acknowledging that machine learning systems inherently involve probabilistic outputs and irreducible uncertainty. The following risk appetite levels apply per domain:
+AutoML operates with a **moderate** overall risk appetite, acknowledging that machine learning systems inherently involve probabilistic outputs and irreducible uncertainty. The following risk appetite levels apply per domain:
 
 | Domain | Appetite | Rationale |
 |---|---|---|

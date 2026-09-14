@@ -1,6 +1,6 @@
 //! Integration test: QualityPipeline gates produce valid outputs on Iris-like data.
 
-use kolosal_automl::quality::{
+use automl::quality::{
     QualityContext,
     pre_training::{LeakageDetector, DistributionFingerprint, PreTrainingGate},
     training::{AlgorithmSelector, CvStrategyChooser},
@@ -10,7 +10,7 @@ use kolosal_automl::quality::{
         entropy_confidence, OodDetector, expected_calibration_error,
     },
 };
-use kolosal_automl::quality::CvStrategy;
+use automl::quality::CvStrategy;
 use ndarray::{Array1, Array2};
 
 fn make_iris_like() -> (Array2<f64>, Array1<f64>) {
@@ -71,7 +71,7 @@ fn test_cv_strategy_for_iris_uses_repeated() {
 
 #[test]
 fn test_pareto_front_with_iris_trials() {
-    use kolosal_automl::quality::ParetoPoint;
+    use automl::quality::ParetoPoint;
     let trials = vec![
         ParetoPoint { metric_score: 0.95, latency_ms: 5.0, trial_id: 0 },
         ParetoPoint { metric_score: 0.92, latency_ms: 2.0, trial_id: 1 },

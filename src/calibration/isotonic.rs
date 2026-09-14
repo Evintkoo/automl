@@ -1,6 +1,6 @@
 //! Isotonic regression calibration
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::calibration::Calibrator;
 use ndarray::Array1;
 use serde::{Deserialize, Serialize};
@@ -169,13 +169,13 @@ impl Calibrator for IsotonicRegression {
     fn fit(&mut self, probs: &Array1<f64>, labels: &Array1<f64>) -> Result<()> {
         let n = probs.len();
         if n != labels.len() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Probabilities and labels must have same length".to_string(),
             ));
         }
 
         if n == 0 {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Empty input".to_string(),
             ));
         }
@@ -201,7 +201,7 @@ impl Calibrator for IsotonicRegression {
 
     fn calibrate(&self, probs: &Array1<f64>) -> Result<Array1<f64>> {
         if self.x_values.is_none() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Calibrator not fitted".to_string(),
             ));
         }

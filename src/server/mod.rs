@@ -1,6 +1,6 @@
-//! Kolosal AutoML Server Module
+//! AutoML Server Module
 //!
-//! High-performance web server for the Kolosal AutoML platform.
+//! High-performance web server for the AutoML platform.
 //! Provides REST API and web UI for data preprocessing, model training,
 //! and inference.
 
@@ -58,8 +58,8 @@ impl ServerConfig {
         }
 
         let candidates = [
-            "kolosal-web/static".to_string(),
-            format!("{}/kolosal-web/static", env!("CARGO_MANIFEST_DIR")),
+            "automl-web/static".to_string(),
+            format!("{}/automl-web/static", env!("CARGO_MANIFEST_DIR")),
         ];
 
         for candidate in &candidates {
@@ -69,7 +69,7 @@ impl ServerConfig {
         }
 
         // Return default relative path as last resort
-        "kolosal-web/static".to_string()
+        "automl-web/static".to_string()
     }
 }
 
@@ -106,7 +106,7 @@ pub async fn run_server(config: ServerConfig) -> anyhow::Result<()> {
         address = %addr,
         max_upload_size_mb = config.max_upload_size / 1024 / 1024,
         started_at = %start_time.to_rfc3339(),
-        "Kolosal AutoML Server starting"
+        "AutoML Server starting"
     );
     info!(url = %format!("http://{}", addr), "Web UI available");
     info!(url = %format!("http://{}/api", addr), "REST API available");

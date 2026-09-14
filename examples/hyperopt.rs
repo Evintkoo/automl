@@ -3,8 +3,8 @@
 //! Demonstrates using HyperOptX for automatic hyperparameter tuning.
 
 use polars::prelude::*;
-use kolosal_automl::optimizer::{HyperOptX, OptimizationConfig, SearchSpace, OptimizeDirection};
-use kolosal_automl::training::{TrainEngine, TrainingConfig, TaskType, ModelType};
+use automl::optimizer::{HyperOptX, OptimizationConfig, SearchSpace, OptimizeDirection};
+use automl::training::{TrainEngine, TrainingConfig, TaskType, ModelType};
 
 fn main() -> anyhow::Result<()> {
     // Create sample classification data

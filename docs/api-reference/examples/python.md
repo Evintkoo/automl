@@ -1,6 +1,6 @@
 # 🐍 Python API Examples
 
-Complete examples for integrating Kolosal AutoML with Python applications.
+Complete examples for integrating AutoML with Python applications.
 
 ## 📚 Table of Contents
 
@@ -23,8 +23,8 @@ import json
 from typing import Dict, Any, Optional, List
 import time
 
-class KolosalClient:
-    """Python client for Kolosal AutoML API"""
+class AutoMLClient:
+    """Python client for AutoML API"""
     
     def __init__(self, base_url: str = "http://localhost:8000", api_key: Optional[str] = None):
         self.base_url = base_url.rstrip('/')
@@ -48,9 +48,9 @@ class KolosalClient:
         return self._handle_response(response)
 
 # Initialize client
-client = KolosalClient(
+client = AutoMLClient(
     base_url="http://localhost:8000",
-    api_key="genta_your_api_key_here"
+    api_key="automl_your_api_key_here"
 )
 
 # Test connection
@@ -67,20 +67,20 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-class KolosalConfig:
+class AutoMLConfig:
     """Configuration management"""
     
     def __init__(self):
-        self.api_url = os.getenv("KOLOSAL_API_URL", "http://localhost:8000")
-        self.api_key = os.getenv("KOLOSAL_API_KEY")
-        self.timeout = int(os.getenv("KOLOSAL_TIMEOUT", "30"))
+        self.api_url = os.getenv("AUTOML_API_URL", "http://localhost:8000")
+        self.api_key = os.getenv("AUTOML_API_KEY")
+        self.timeout = int(os.getenv("AUTOML_TIMEOUT", "30"))
         
         if not self.api_key:
-            raise ValueError("KOLOSAL_API_KEY environment variable is required")
+            raise ValueError("AUTOML_API_KEY environment variable is required")
 
 # Usage
-config = KolosalConfig()
-client = KolosalClient(config.api_url, config.api_key)
+config = AutoMLConfig()
+client = AutoMLClient(config.api_url, config.api_key)
 ```
 
 ## 🚂 Training Models
@@ -139,7 +139,7 @@ job_id, X_test, y_test = train_classification_model()
 ### Monitor Training Progress
 
 ```python
-def monitor_training(client: KolosalClient, job_id: str, poll_interval: int = 10):
+def monitor_training(client: AutoMLClient, job_id: str, poll_interval: int = 10):
     """Monitor training progress with real-time updates"""
     
     print(f"📊 Monitoring training job: {job_id}")
@@ -186,7 +186,7 @@ if results:
 import pandas as pd
 from pathlib import Path
 
-def upload_and_train_from_csv(client: KolosalClient, csv_path: str, target_column: str):
+def upload_and_train_from_csv(client: AutoMLClient, csv_path: str, target_column: str):
     """Upload CSV file and train model"""
     
     # Upload dataset
@@ -242,7 +242,7 @@ def train_with_advanced_config():
         "data": X_train.tolist(),
         "target": y_train.tolist(),
         "task_type": "classification",
-        "optimization_strategy": "asht",  # Kolosal's proprietary optimizer
+        "optimization_strategy": "asht",  # AutoML's proprietary optimizer
         "config": {
             # Cross-validation settings
             "cv_folds": 10,
@@ -302,7 +302,7 @@ def train_with_advanced_config():
 ### Single Prediction
 
 ```python
-def make_single_prediction(client: KolosalClient, model_id: str, features: List[float]):
+def make_single_prediction(client: AutoMLClient, model_id: str, features: List[float]):
     """Make a single prediction"""
     
     prediction_request = {
@@ -333,7 +333,7 @@ prediction = make_single_prediction(client, model_id, sample_features)
 ### Batch Predictions
 
 ```python
-def make_batch_predictions(client: KolosalClient, model_id: str, features_batch: List[List[float]]):
+def make_batch_predictions(client: AutoMLClient, model_id: str, features_batch: List[List[float]]):
     """Make predictions on multiple samples efficiently"""
     
     batch_request = {
@@ -377,7 +377,7 @@ from concurrent.futures import ThreadPoolExecutor
 class AsyncPredictionClient:
     """Async prediction client for high-throughput scenarios"""
     
-    def __init__(self, client: KolosalClient):
+    def __init__(self, client: AutoMLClient):
         self.client = client
         
     def submit_async_prediction(self, model_id: str, data: List[List[float]], 
@@ -447,7 +447,7 @@ print(f"📊 Async results: {len(async_results['predictions'])} predictions")
 ### Large Dataset Processing
 
 ```python
-def process_large_dataset(client: KolosalClient, dataset_path: str, operation: str = "inference"):
+def process_large_dataset(client: AutoMLClient, dataset_path: str, operation: str = "inference"):
     """Process large datasets with batch operations"""
     
     batch_job_request = {
@@ -480,7 +480,7 @@ def process_large_dataset(client: KolosalClient, dataset_path: str, operation: s
     result = client._handle_response(response)
     return result["batch_job_id"]
 
-def monitor_batch_job(client: KolosalClient, batch_job_id: str):
+def monitor_batch_job(client: AutoMLClient, batch_job_id: str):
     """Monitor batch processing job"""
     
     print(f"📊 Monitoring batch job: {batch_job_id}")
@@ -514,7 +514,7 @@ def monitor_batch_job(client: KolosalClient, batch_job_id: str):
 ### List and Search Models
 
 ```python
-def list_models(client: KolosalClient, task_type: Optional[str] = None, 
+def list_models(client: AutoMLClient, task_type: Optional[str] = None, 
                 status: str = "active", limit: int = 50):
     """List available models with filtering"""
     
@@ -540,7 +540,7 @@ def list_models(client: KolosalClient, task_type: Optional[str] = None,
     
     return result["models"]
 
-def get_model_details(client: KolosalClient, model_id: str):
+def get_model_details(client: AutoMLClient, model_id: str):
     """Get comprehensive model information"""
     
     response = client.session.get(f"{client.base_url}/api/models/{model_id}")
@@ -565,7 +565,7 @@ if classification_models:
 ### Model Comparison
 
 ```python
-def compare_models(client: KolosalClient, model_ids: List[str]):
+def compare_models(client: AutoMLClient, model_ids: List[str]):
     """Compare multiple models side by side"""
     
     models_info = []
@@ -594,7 +594,7 @@ def compare_models(client: KolosalClient, model_ids: List[str]):
 ### Model Deployment and Export
 
 ```python
-def deploy_model(client: KolosalClient, model_id: str, deployment_config: Dict[str, Any]):
+def deploy_model(client: AutoMLClient, model_id: str, deployment_config: Dict[str, Any]):
     """Deploy model to production environment"""
     
     deployment_request = {
@@ -620,7 +620,7 @@ def deploy_model(client: KolosalClient, model_id: str, deployment_config: Dict[s
     
     return client._handle_response(response)
 
-def export_model(client: KolosalClient, model_id: str, format: str = "pickle"):
+def export_model(client: AutoMLClient, model_id: str, format: str = "pickle"):
     """Export model in various formats"""
     
     export_request = {
@@ -659,8 +659,8 @@ def export_model(client: KolosalClient, model_id: str, format: str = "pickle"):
 ### Data Preprocessing Pipeline
 
 ```python
-def preprocess_data(client: KolosalClient, raw_data: List[List], config: Dict[str, Any]):
-    """Preprocess data using Kolosal's preprocessing pipeline"""
+def preprocess_data(client: AutoMLClient, raw_data: List[List], config: Dict[str, Any]):
+    """Preprocess data using AutoML's preprocessing pipeline"""
     
     preprocessing_request = {
         "data": raw_data,
@@ -692,7 +692,7 @@ def preprocess_data(client: KolosalClient, raw_data: List[List], config: Dict[st
     
     return result
 
-def validate_data_quality(client: KolosalClient, data: List[List], schema: Dict[str, Any]):
+def validate_data_quality(client: AutoMLClient, data: List[List], schema: Dict[str, Any]):
     """Validate data quality and get recommendations"""
     
     validation_request = {
@@ -744,7 +744,7 @@ preprocessing_config = {
 ### System Monitoring
 
 ```python
-def get_system_metrics(client: KolosalClient):
+def get_system_metrics(client: AutoMLClient):
     """Get comprehensive system metrics"""
     
     response = client.session.get(f"{client.base_url}/api/metrics")
@@ -761,7 +761,7 @@ def get_system_metrics(client: KolosalClient):
     
     return metrics
 
-def monitor_model_performance(client: KolosalClient, model_id: str, time_range: str = "24h"):
+def monitor_model_performance(client: AutoMLClient, model_id: str, time_range: str = "24h"):
     """Monitor specific model performance"""
     
     params = {
@@ -797,9 +797,9 @@ system_metrics = get_system_metrics(client)
 
 ```python
 class MLPipeline:
-    """Advanced ML pipeline with Kolosal AutoML"""
+    """Advanced ML pipeline with AutoML"""
     
-    def __init__(self, client: KolosalClient):
+    def __init__(self, client: AutoMLClient):
         self.client = client
         self.models = {}
         self.preprocessing_pipelines = {}
@@ -898,7 +898,7 @@ import json
 class RealTimePredictionStreamer:
     """Stream real-time predictions using WebSocket"""
     
-    def __init__(self, client: KolosalClient, model_id: str):
+    def __init__(self, client: AutoMLClient, model_id: str):
         self.client = client
         self.model_id = model_id
         self.ws_url = client.base_url.replace("http", "ws") + f"/ws/predict/{model_id}"
@@ -942,7 +942,7 @@ class RealTimePredictionStreamer:
 class ModelABTesting:
     """A/B testing framework for model comparison"""
     
-    def __init__(self, client: KolosalClient):
+    def __init__(self, client: AutoMLClient):
         self.client = client
         
     def setup_ab_test(self, model_a_id: str, model_b_id: str, 
@@ -1082,13 +1082,13 @@ def complete_ml_workflow():
 
 ## 🎯 Next Steps
 
-This comprehensive guide covers all aspects of Python integration with Kolosal AutoML. For more information:
+This comprehensive guide covers all aspects of Python integration with AutoML. For more information:
 
 - 🌐 **[JavaScript Examples](javascript.md)** - Browser and Node.js integration
 - ⚡ **[cURL Examples](curl.md)** - Command-line interface examples  
 - 📚 **[API Reference](../README.md)** - Complete API documentation
 - 🚀 **[User Guides](../../user-guides/)** - Task-oriented tutorials
 
-Happy coding with Kolosal AutoML! 🚀
+Happy coding with AutoML! 🚀
 
 *Python Examples v1.0 | Last updated: January 2025*

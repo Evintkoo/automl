@@ -9,7 +9,7 @@
 //! - Classification probability support
 
 use crate::cache::LruTtlCache;
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::monitoring::PerformanceMetrics;
 use crate::preprocessing::DataPreprocessor;
 use crate::training::TrainEngine;
@@ -169,9 +169,9 @@ impl InferenceEngine {
     /// Warm up the engine by running a dummy prediction to prime caches and JIT paths
     pub fn warmup(&mut self) -> Result<()> {
         if !self.is_loaded {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
-        let model = self.model.as_ref().ok_or(KolosalError::ModelNotFitted)?;
+        let model = self.model.as_ref().ok_or(AutoMLError::ModelNotFitted)?;
         let n_features = model.feature_names().len();
         if n_features == 0 {
             return Ok(());
@@ -184,7 +184,7 @@ impl InferenceEngine {
         }).collect();
 
         let df = DataFrame::new(columns)
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         let processed = if let Some(ref preprocessor) = self.preprocessor {
             preprocessor.transform(&df)?
@@ -266,10 +266,10 @@ impl InferenceEngine {
 
         if !self.is_loaded {
             self.metrics.record_error();
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
-        let model = self.model.as_ref().ok_or(KolosalError::ModelNotFitted)?;
+        let model = self.model.as_ref().ok_or(AutoMLError::ModelNotFitted)?;
         let n_rows = df.height();
 
         // Check prediction cache for small inputs
@@ -337,17 +337,17 @@ impl InferenceEngine {
 
         if !self.is_loaded {
             self.metrics.record_error();
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
-        let model = self.model.as_ref().ok_or(KolosalError::ModelNotFitted)?;
+        let model = self.model.as_ref().ok_or(AutoMLError::ModelNotFitted)?;
 
         // Get feature names from model
         let feature_names = model.feature_names();
 
         if x.ncols() != feature_names.len() {
             self.metrics.record_error();
-            return Err(KolosalError::ShapeError {
+            return Err(AutoMLError::ShapeError {
                 expected: format!("{} features", feature_names.len()),
                 actual: format!("{} features", x.ncols()),
             });
@@ -428,10 +428,10 @@ impl InferenceEngine {
 
         if !self.is_loaded {
             self.metrics.record_error();
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
-        let model = self.model.as_ref().ok_or(KolosalError::ModelNotFitted)?;
+        let model = self.model.as_ref().ok_or(AutoMLError::ModelNotFitted)?;
 
         // Apply preprocessing if available
         let processed = if let Some(ref preprocessor) = self.preprocessor {
@@ -460,15 +460,15 @@ impl InferenceEngine {
 
         if !self.is_loaded {
             self.metrics.record_error();
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
-        let model = self.model.as_ref().ok_or(KolosalError::ModelNotFitted)?;
+        let model = self.model.as_ref().ok_or(AutoMLError::ModelNotFitted)?;
         let feature_names = model.feature_names();
 
         if x.ncols() != feature_names.len() {
             self.metrics.record_error();
-            return Err(KolosalError::ShapeError {
+            return Err(AutoMLError::ShapeError {
                 expected: format!("{} features", feature_names.len()),
                 actual: format!("{} features", x.ncols()),
             });
@@ -505,10 +505,10 @@ impl InferenceEngine {
         df: &'a DataFrame,
     ) -> Result<impl Iterator<Item = Result<Array1<f64>>> + 'a> {
         if !self.is_loaded {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
-        let model = self.model.as_ref().ok_or(KolosalError::ModelNotFitted)?;
+        let model = self.model.as_ref().ok_or(AutoMLError::ModelNotFitted)?;
         let chunk_size = self.config.stream_chunk_size;
         let n_chunks = (df.height() + chunk_size - 1) / chunk_size;
 
@@ -581,7 +581,7 @@ impl InferenceEngine {
                 })
                 .collect()
         };
-        DataFrame::new(columns).map_err(|e| KolosalError::DataError(e.to_string()))
+        DataFrame::new(columns).map_err(|e| AutoMLError::DataError(e.to_string()))
     }
 
     /// Sequential batch prediction
@@ -618,7 +618,7 @@ impl InferenceEngine {
                 rayon::ThreadPoolBuilder::new()
                     .num_threads(n_workers)
                     .build()
-                    .map_err(|e| KolosalError::InferenceError(format!("Thread pool error: {}", e)))?
+                    .map_err(|e| AutoMLError::InferenceError(format!("Thread pool error: {}", e)))?
             )
         } else {
             None

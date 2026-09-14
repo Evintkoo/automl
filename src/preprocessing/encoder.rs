@@ -1,6 +1,6 @@
 //! Categorical encoding implementations
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -56,7 +56,7 @@ impl Encoder {
         for col_name in columns {
             let column = df
                 .column(col_name)
-                .map_err(|_| KolosalError::FeatureNotFound(col_name.to_string()))?;
+                .map_err(|_| AutoMLError::FeatureNotFound(col_name.to_string()))?;
             let series = column.as_materialized_series();
 
             let mapping = self.build_mapping(series)?;
@@ -80,12 +80,12 @@ impl Encoder {
 
         let target_values = target
             .f64()
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         for col_name in columns {
             let column = df
                 .column(col_name)
-                .map_err(|_| KolosalError::FeatureNotFound(col_name.to_string()))?;
+                .map_err(|_| AutoMLError::FeatureNotFound(col_name.to_string()))?;
             let series = column.as_materialized_series();
 
             // Build regular mapping
@@ -104,7 +104,7 @@ impl Encoder {
     /// Transform the data
     pub fn transform(&self, df: &DataFrame) -> Result<DataFrame> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         match &self.encoder_type {
@@ -128,7 +128,7 @@ impl Encoder {
         let mut mapping = HashMap::new();
         let ca = series
             .str()
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         let mut idx = 0usize;
         for val in ca.into_iter().flatten() {
@@ -151,7 +151,7 @@ impl Encoder {
 
         let ca = series
             .str()
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         for (cat, target_val) in ca.into_iter().zip(target.into_iter()) {
             if let (Some(c), Some(t)) = (cat, target_val) {
@@ -178,7 +178,7 @@ impl Encoder {
             if let Ok(series) = df.column(col_name) {
                 let ca = series
                     .str()
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?;
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
                 // Create binary column for each category
                 for (category, _) in mapping {
@@ -191,14 +191,14 @@ impl Encoder {
                     let new_series = Series::new(new_col_name.into(), values);
                     result = result
                         .with_column(new_series)
-                        .map_err(|e| KolosalError::DataError(e.to_string()))?
+                        .map_err(|e| AutoMLError::DataError(e.to_string()))?
                         .clone();
                 }
 
                 // Drop original column
                 result = result
                     .drop(col_name)
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?;
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?;
             }
         }
 
@@ -210,7 +210,7 @@ impl Encoder {
         let mut new_cols: Vec<Series> = Vec::new();
         for (col_name, mapping) in &self.mappings {
             if let Ok(series) = df.column(col_name) {
-                let ca = series.str().map_err(|e| KolosalError::DataError(e.to_string()))?;
+                let ca = series.str().map_err(|e| AutoMLError::DataError(e.to_string()))?;
                 let values: Vec<Option<i64>> = ca
                     .into_iter()
                     .map(|v| v.and_then(|s| mapping.get(s).map(|&i| i as i64)))
@@ -221,7 +221,7 @@ impl Encoder {
         // One clone + N in-place mutations — no clone after each with_column
         let mut result = df.clone();
         for col in new_cols {
-            result.with_column(col).map_err(|e| KolosalError::DataError(e.to_string()))?;
+            result.with_column(col).map_err(|e| AutoMLError::DataError(e.to_string()))?;
         }
         Ok(result)
     }
@@ -230,7 +230,7 @@ impl Encoder {
         let mut new_cols: Vec<Series> = Vec::new();
         for (col_name, means) in &self.target_means {
             if let Ok(series) = df.column(col_name) {
-                let ca = series.str().map_err(|e| KolosalError::DataError(e.to_string()))?;
+                let ca = series.str().map_err(|e| AutoMLError::DataError(e.to_string()))?;
                 let global_mean: f64 = means.values().sum::<f64>() / means.len().max(1) as f64;
                 let values: Vec<f64> = ca
                     .into_iter()
@@ -241,7 +241,7 @@ impl Encoder {
         }
         let mut result = df.clone();
         for col in new_cols {
-            result.with_column(col).map_err(|e| KolosalError::DataError(e.to_string()))?;
+            result.with_column(col).map_err(|e| AutoMLError::DataError(e.to_string()))?;
         }
         Ok(result)
     }
@@ -252,7 +252,7 @@ impl Encoder {
         let new_cols: Vec<Result<Series>> = self.mappings.par_iter()
             .filter_map(|(col_name, _mapping)| {
                 df.column(col_name).ok().map(|series| {
-                    let ca = series.str().map_err(|e| KolosalError::DataError(e.to_string()))?;
+                    let ca = series.str().map_err(|e| AutoMLError::DataError(e.to_string()))?;
                     let total = ca.len() as f64;
                     // Collect values once to allow two-pass logic safely
                     let raw_vals: Vec<Option<String>> = ca.into_iter()
@@ -274,7 +274,7 @@ impl Encoder {
         let new_cols: Vec<Series> = new_cols.into_iter().collect::<Result<Vec<_>>>()?;
         let mut result = df.clone();
         for col in new_cols {
-            result.with_column(col).map_err(|e| KolosalError::DataError(e.to_string()))?;
+            result.with_column(col).map_err(|e| AutoMLError::DataError(e.to_string()))?;
         }
         Ok(result)
     }
@@ -285,7 +285,7 @@ impl Encoder {
 
         for (col_name, mapping) in &self.mappings {
             if let Ok(series) = df.column(col_name) {
-                let ca = series.str().map_err(|e| KolosalError::DataError(e.to_string()))?;
+                let ca = series.str().map_err(|e| AutoMLError::DataError(e.to_string()))?;
                 let n_categories = mapping.len();
                 if n_categories == 0 {
                     cols_to_drop.push(col_name.clone());
@@ -313,12 +313,12 @@ impl Encoder {
         // Build result: one clone + drop originals + add all new columns
         let mut result = df.clone();
         for col_name in &cols_to_drop {
-            result = result.drop(col_name).map_err(|e| KolosalError::DataError(e.to_string()))?;
+            result = result.drop(col_name).map_err(|e| AutoMLError::DataError(e.to_string()))?;
         }
         // Build final DataFrame with new columns appended
         let mut all_cols: Vec<Column> = result.get_columns().to_vec();
         all_cols.extend(extra_cols.into_iter().map(|s| s.into()));
-        DataFrame::new(all_cols).map_err(|e| KolosalError::DataError(e.to_string()))
+        DataFrame::new(all_cols).map_err(|e| AutoMLError::DataError(e.to_string()))
     }
 
     fn transform_hash(&self, df: &DataFrame, n_components: usize) -> Result<DataFrame> {
@@ -327,7 +327,7 @@ impl Encoder {
 
         for col_name in self.mappings.keys() {
             if let Ok(series) = df.column(col_name) {
-                let ca = series.str().map_err(|e| KolosalError::DataError(e.to_string()))?;
+                let ca = series.str().map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
                 // Row-outer, component-inner: each row read once for all components
                 let mut component_values: Vec<Vec<f64>> = vec![Vec::with_capacity(ca.len()); n_components];
@@ -352,11 +352,11 @@ impl Encoder {
 
         let mut result = df.clone();
         for col_name in &cols_to_drop {
-            result = result.drop(col_name).map_err(|e| KolosalError::DataError(e.to_string()))?;
+            result = result.drop(col_name).map_err(|e| AutoMLError::DataError(e.to_string()))?;
         }
         let mut all_cols: Vec<Column> = result.get_columns().to_vec();
         all_cols.extend(extra_cols.into_iter().map(|s| s.into()));
-        DataFrame::new(all_cols).map_err(|e| KolosalError::DataError(e.to_string()))
+        DataFrame::new(all_cols).map_err(|e| AutoMLError::DataError(e.to_string()))
     }
 
     /// Hash a string to a bucket index using murmur-like hashing

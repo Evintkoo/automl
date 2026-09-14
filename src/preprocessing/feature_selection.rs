@@ -7,7 +7,7 @@
 //! - Correlation-based selection
 //! - L1-based selection (Lasso)
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -119,11 +119,11 @@ impl FeatureSelector {
     /// Transform data by selecting features
     pub fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         let selected = self.selected_features.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Selector not fitted".to_string())
+            AutoMLError::ValidationError("Selector not fitted".to_string())
         })?;
 
         if selected.is_empty() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "No features selected".to_string(),
             ));
         }
@@ -542,7 +542,7 @@ impl CorrelationFilter {
     /// Transform data
     pub fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         let selected = self.selected_features.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Filter not fitted".to_string())
+            AutoMLError::ValidationError("Filter not fitted".to_string())
         })?;
 
         let n_samples = x.nrows();

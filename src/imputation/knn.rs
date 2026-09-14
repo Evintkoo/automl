@@ -1,6 +1,6 @@
 //! KNN-based imputation
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::imputation::{Imputer, is_missing};
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
@@ -181,7 +181,7 @@ impl Imputer for KNNImputer {
             .collect();
 
         if complete_rows.is_empty() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "No complete rows found for KNN imputation".to_string()
             ));
         }
@@ -197,7 +197,7 @@ impl Imputer for KNNImputer {
 
         // Compute feature means from complete data
         let feature_means = complete_data.mean_axis(ndarray::Axis(0))
-            .ok_or_else(|| KolosalError::ValidationError("Failed to compute means".to_string()))?;
+            .ok_or_else(|| AutoMLError::ValidationError("Failed to compute means".to_string()))?;
 
         self.complete_data = Some(complete_data);
         self.feature_means = Some(feature_means);
@@ -207,7 +207,7 @@ impl Imputer for KNNImputer {
 
     fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         if self.complete_data.is_none() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Imputer not fitted".to_string()
             ));
         }

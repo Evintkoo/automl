@@ -1,4 +1,4 @@
-//! Kolosal AutoML CLI Module
+//! AutoML CLI Module
 //!
 //! Command-line interface for training, prediction, and data processing.
 
@@ -85,8 +85,8 @@ fn wait_enter() {
 // ─── CLI definition ────────────────────────────────────────────────────────────
 
 #[derive(Parser)]
-#[command(name = "kolosal")]
-#[command(author = "KolosalAI")]
+#[command(name = "automl")]
+#[command(author = "Evintkoo")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "High-performance AutoML framework in Rust")]
 #[command(long_about = None)]
@@ -485,7 +485,7 @@ pub async fn cmd_serve(host: &str, port: u16) -> anyhow::Result<()> {
     println!();
     line_box_top();
     line_box_empty();
-    line_box_center(&format!("{}", "Kolosal AutoML".white().bold()));
+    line_box_center(&format!("{}", "AutoML".white().bold()));
     line_box_center(&format!("{}", dim(&format!("v{}", env!("CARGO_PKG_VERSION")))));
     line_box_empty();
     line_box_sep();
@@ -547,7 +547,7 @@ fn show_system_info() {
         sys.used_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
         sys.total_memory() as f64 / 1024.0 / 1024.0 / 1024.0,
     );
-    println!("  {:<12} v{}", muted("Kolosal"), env!("CARGO_PKG_VERSION"));
+    println!("  {:<12} v{}", muted("AutoML"), env!("CARGO_PKG_VERSION"));
     println!();
 }
 
@@ -566,13 +566,13 @@ fn show_help() {
     section("Commands");
 
     let cmds: &[(&str, &str)] = &[
-        ("kolosal", "Interactive launcher (default)"),
-        ("kolosal serve", "Start web UI + API server"),
-        ("kolosal serve -p 3000", "Serve on custom port"),
-        ("kolosal train -d data.csv -t col", "Train a model"),
-        ("kolosal benchmark -d data.csv -t col", "Compare all models"),
-        ("kolosal preprocess -d in.csv -o out.csv", "Preprocess data"),
-        ("kolosal info -d data.csv", "Inspect a dataset"),
+        ("automl", "Interactive launcher (default)"),
+        ("automl serve", "Start web UI + API server"),
+        ("automl serve -p 3000", "Serve on custom port"),
+        ("automl train -d data.csv -t col", "Train a model"),
+        ("automl benchmark -d data.csv -t col", "Compare all models"),
+        ("automl preprocess -d in.csv -o out.csv", "Preprocess data"),
+        ("automl info -d data.csv", "Inspect a dataset"),
     ];
 
     for (cmd, desc) in cmds {

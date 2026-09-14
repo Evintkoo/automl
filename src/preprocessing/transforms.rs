@@ -2,7 +2,7 @@
 //!
 //! Provides log, power, box-cox, yeo-johnson transforms and binning/discretization.
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -67,12 +67,12 @@ impl Transformer {
         for col_name in columns {
             let column = df
                 .column(col_name)
-                .map_err(|_| KolosalError::FeatureNotFound(col_name.to_string()))?;
+                .map_err(|_| AutoMLError::FeatureNotFound(col_name.to_string()))?;
             let series = column.as_materialized_series();
             
             let values: Vec<f64> = series
                 .f64()
-                .map_err(|e| KolosalError::DataError(e.to_string()))?
+                .map_err(|e| AutoMLError::DataError(e.to_string()))?
                 .into_iter()
                 .filter_map(|v| v)
                 .collect();
@@ -202,7 +202,7 @@ impl Transformer {
     /// Transform the data
     pub fn transform(&self, df: &DataFrame) -> Result<DataFrame> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         let mut result = df.clone();
@@ -213,7 +213,7 @@ impl Transformer {
                 let transformed = self.transform_series(series, params)?;
                 result
                     .with_column(transformed)
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?;
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?;
             }
         }
 
@@ -225,7 +225,7 @@ impl Transformer {
         let name = series.name().to_string();
         let values: Vec<Option<f64>> = series
             .f64()
-            .map_err(|e| KolosalError::DataError(e.to_string()))?
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?
             .into_iter()
             .map(|v| v.map(|x| self.transform_value(x, params)))
             .collect();
@@ -293,7 +293,7 @@ impl Transformer {
     /// Inverse transform (where applicable)
     pub fn inverse_transform(&self, df: &DataFrame) -> Result<DataFrame> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         let mut result = df.clone();
@@ -304,7 +304,7 @@ impl Transformer {
                 let inverse = self.inverse_transform_series(series, params)?;
                 result
                     .with_column(inverse)
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?;
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?;
             }
         }
 
@@ -316,7 +316,7 @@ impl Transformer {
         let name = series.name().to_string();
         let values: Vec<Option<f64>> = series
             .f64()
-            .map_err(|e| KolosalError::DataError(e.to_string()))?
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?
             .into_iter()
             .map(|v| v.map(|y| self.inverse_transform_value(y, params)))
             .collect();
@@ -450,12 +450,12 @@ impl Binner {
         for col_name in columns {
             let column = df
                 .column(col_name)
-                .map_err(|_| KolosalError::FeatureNotFound(col_name.to_string()))?;
+                .map_err(|_| AutoMLError::FeatureNotFound(col_name.to_string()))?;
             let series = column.as_materialized_series();
             
             let mut values: Vec<f64> = series
                 .f64()
-                .map_err(|e| KolosalError::DataError(e.to_string()))?
+                .map_err(|e| AutoMLError::DataError(e.to_string()))?
                 .into_iter()
                 .filter_map(|v| v)
                 .collect();
@@ -471,7 +471,7 @@ impl Binner {
     /// Compute bin edges based on strategy
     fn compute_bin_edges(&self, values: &mut Vec<f64>) -> Result<Vec<f64>> {
         if values.is_empty() {
-            return Err(KolosalError::DataError("Empty column".to_string()));
+            return Err(AutoMLError::DataError("Empty column".to_string()));
         }
 
         values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -571,7 +571,7 @@ impl Binner {
     /// Transform the data
     pub fn transform(&self, df: &DataFrame) -> Result<DataFrame> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         let mut result = df.clone();
@@ -582,7 +582,7 @@ impl Binner {
                 let binned = self.bin_series(series, edges)?;
                 result
                     .with_column(binned)
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?;
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?;
             }
         }
 
@@ -595,7 +595,7 @@ impl Binner {
         
         let values: Vec<Option<f64>> = series
             .f64()
-            .map_err(|e| KolosalError::DataError(e.to_string()))?
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?
             .into_iter()
             .map(|v| v.map(|x| self.find_bin(x, edges) as f64))
             .collect();

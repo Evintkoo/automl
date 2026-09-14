@@ -3,7 +3,7 @@
 //! Supports multiple loss functions and learning rate schedules.
 //! Efficient for large-scale learning — processes one sample at a time.
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::{Array1, Array2};
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
@@ -98,7 +98,7 @@ impl SGDRegressor {
         self.epoch_records.clear();
         let n = x.nrows();
         let p = x.ncols();
-        if n == 0 { return Err(KolosalError::TrainingError("Empty dataset".into())); }
+        if n == 0 { return Err(AutoMLError::TrainingError("Empty dataset".into())); }
 
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(self.config.random_state.unwrap_or(42));
         let mut w = Array1::zeros(p);
@@ -181,7 +181,7 @@ impl SGDRegressor {
     }
 
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
-        let w = self.weights.as_ref().ok_or_else(|| KolosalError::TrainingError("Model not fitted".into()))?;
+        let w = self.weights.as_ref().ok_or_else(|| AutoMLError::TrainingError("Model not fitted".into()))?;
         Ok(Array1::from_vec(x.rows().into_iter().map(|row| row.dot(w) + self.bias).collect()))
     }
 }
@@ -208,7 +208,7 @@ impl SGDClassifier {
         self.epoch_records.clear();
         let n = x.nrows();
         let p = x.ncols();
-        if n == 0 { return Err(KolosalError::TrainingError("Empty dataset".into())); }
+        if n == 0 { return Err(AutoMLError::TrainingError("Empty dataset".into())); }
 
         // Convert labels: 0/1 → -1/+1 for hinge losses
         let y_signed: Vec<f64> = y.iter().map(|&v| if v > 0.5 { 1.0 } else { -1.0 }).collect();
@@ -308,7 +308,7 @@ impl SGDClassifier {
     }
 
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
-        let w = self.weights.as_ref().ok_or_else(|| KolosalError::TrainingError("Model not fitted".into()))?;
+        let w = self.weights.as_ref().ok_or_else(|| AutoMLError::TrainingError("Model not fitted".into()))?;
         Ok(Array1::from_vec(x.rows().into_iter().map(|row| {
             let margin = row.dot(w) + self.bias;
             match self.config.loss {
@@ -321,7 +321,7 @@ impl SGDClassifier {
     }
 
     pub fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
-        let w = self.weights.as_ref().ok_or_else(|| KolosalError::TrainingError("Model not fitted".into()))?;
+        let w = self.weights.as_ref().ok_or_else(|| AutoMLError::TrainingError("Model not fitted".into()))?;
         let n = x.nrows();
         let mut proba = Array2::zeros((n, 2));
         for (i, row) in x.rows().into_iter().enumerate() {

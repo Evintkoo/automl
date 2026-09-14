@@ -1,21 +1,21 @@
 [package]
-name = "kolosal-automl"
+name = "automl"
 version = "1.0.0"
 edition = "2021"
-authors = ["KolosalAI Team"]
+authors = ["Evintkoo"]
 license = "MIT"
-repository = "https://github.com/KolosalAI/kolosal_automl"
+repository = "https://github.com/Evintkoo/automl"
 description = "High-performance AutoML framework in Rust"
 readme = "README.md"
 keywords = ["machine-learning", "automl", "ml", "ai", "data-science"]
 categories = ["science", "algorithms", "command-line-utilities"]
 
 [lib]
-name = "kolosal_automl"
+name = "automl"
 path = "src/lib.rs"
 
 [[bin]]
-name = "kolosal"
+name = "automl"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,6 +1,6 @@
 //! Random Forest implementation
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use super::decision_tree::{DecisionTree, Criterion};
 use ndarray::{Array1, Array2};
 use rand::SeedableRng;
@@ -161,7 +161,7 @@ impl RandomForest {
         let n_features = x.ncols();
 
         if n_samples != y.len() {
-            return Err(KolosalError::ShapeError {
+            return Err(AutoMLError::ShapeError {
                 expected: format!("y length = {}", n_samples),
                 actual: format!("y length = {}", y.len()),
             });
@@ -274,7 +274,7 @@ impl RandomForest {
     /// Make predictions
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if self.trees.is_empty() {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         // Get predictions from all trees
@@ -284,7 +284,7 @@ impl RandomForest {
             .collect();
 
         if all_predictions.is_empty() {
-            return Err(KolosalError::ComputationError(
+            return Err(AutoMLError::ComputationError(
                 "No tree could make predictions".to_string()
             ));
         }
@@ -330,11 +330,11 @@ impl RandomForest {
     /// Predict class probabilities (classification only)
     pub fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         if self.trees.is_empty() {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         if !self.is_classification {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "predict_proba is only available for classification".to_string()
             ));
         }

@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use kolosal_automl::training::{TrainEngine, TrainingConfig, TaskType, ModelType};
+use automl::training::{TrainEngine, TrainingConfig, TaskType, ModelType};
 use polars::prelude::*;
 use rand::prelude::*;
 

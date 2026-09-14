@@ -1,4 +1,4 @@
-//! Kolosal AutoML - High-performance AutoML engine
+//! AutoML - High-performance AutoML engine
 //!
 //! This crate provides a complete AutoML framework including:
 //! - Data preprocessing, scaling, encoding
@@ -116,12 +116,12 @@ pub mod fairness;
 pub mod privacy;
 pub mod compliance;
 
-pub use error::{KolosalError, Result};
+pub use error::{AutoMLError, Result};
 
 /// Re-export commonly used types
 pub mod prelude {
     // Error handling
-    pub use crate::error::{KolosalError, Result};
+    pub use crate::error::{AutoMLError, Result};
     
     // Preprocessing
     pub use crate::preprocessing::{DataPreprocessor, PreprocessingConfig, FeatureSelector, SelectionMethod};

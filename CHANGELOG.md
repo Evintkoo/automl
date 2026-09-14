@@ -10,8 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 #### Single-Crate Architecture Migration
-- Consolidated workspace (kolosal-core, kolosal-cli, kolosal-python, kolosal-server) into a unified single crate
-- All modules now under `src/` with `kolosal-automl` as the single package name
+- Consolidated workspace (automl-core, automl-cli, automl-python, automl-server) into a unified single crate
+- All modules now under `src/` with `automl` as the single package name
 
 #### Performance & Infrastructure Modules
 - **Batch Processing** (`src/batch/`) — Priority-based async batch processing with adaptive sizing
@@ -36,12 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive doc comments on all modules
 
 ### Changed
-- Renamed crate from `kolosal_core` to `kolosal_automl`
+- Renamed crate from `automl_core` to `automl`
 - Updated all examples to use new crate name and correct APIs
 - Fixed test data to avoid singular matrix issues in training/inference tests
 
 ### Removed
-- Workspace structure (kolosal-core, kolosal-cli, kolosal-python, kolosal-server crates)
+- Workspace structure (automl-core, automl-cli, automl-python, automl-server crates)
 - Python bindings (PyO3) — pure Rust only
 
 ## [0.4.0] - 2024-02-03
@@ -105,14 +105,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 This release completes the migration to pure Rust, removing all Python dependencies.
 
-- **Web Server (kolosal-server)**
+- **Web Server (automl-server)**
   - Axum 0.7 based HTTP server
   - REST API for data, training, and inference
   - Static file serving for web UI
   - CORS and compression middleware
   - Real-time system monitoring endpoints
 
-- **Web UI (kolosal-web)**
+- **Web UI (automl-web)**
   - htmx + Alpine.js reactive frontend
   - TailwindCSS styling
   - Tab-based navigation: Data, Config, Training, Monitor
@@ -120,7 +120,7 @@ This release completes the migration to pure Rust, removing all Python dependenc
   - Training progress visualization
   - System status monitoring
 
-- **CLI Application (kolosal-cli)**
+- **CLI Application (automl-cli)**
   - `train` - Train models on data files
   - `predict` - Make predictions using trained models
   - `preprocess` - Data preprocessing pipeline
@@ -148,7 +148,7 @@ This release completes the migration to pure Rust, removing all Python dependenc
 
 ### Added
 
-#### Rust Core Library (kolosal-core)
+#### Rust Core Library (automl-core)
 
 - **Preprocessing Engine**
   - `StandardScaler`, `MinMaxScaler`, `RobustScaler` for feature scaling
@@ -191,7 +191,7 @@ This release completes the migration to pure Rust, removing all Python dependenc
   - Arena allocator (bumpalo)
   - Parallel execution with rayon
 
-#### Python Bindings (kolosal-python)
+#### Python Bindings (automl-python)
 
 - PyO3 bindings for all core modules
 - NumPy array interop

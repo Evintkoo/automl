@@ -1,6 +1,6 @@
 //! Polynomial feature generation
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::feature_engineering::FeatureTransformer;
 use ndarray::Array2;
 use serde::{Deserialize, Serialize};
@@ -197,7 +197,7 @@ impl FeatureTransformer for PolynomialFeatures {
 
     fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         let combinations = self.combinations.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Transformer not fitted".to_string())
+            AutoMLError::ValidationError("Transformer not fitted".to_string())
         })?;
 
         let n_samples = x.nrows();

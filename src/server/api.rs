@@ -182,7 +182,7 @@ pub fn create_router(state: Arc<AppState>, config: &ServerConfig) -> Router {
             app = app.nest_service("/static", ServeDir::new(static_path));
         } else {
             // Fallback: try CARGO_MANIFEST_DIR-relative path
-            let manifest_path = format!("{}/kolosal-web/static", env!("CARGO_MANIFEST_DIR"));
+            let manifest_path = format!("{}/automl-web/static", env!("CARGO_MANIFEST_DIR"));
             let fallback_path = std::path::Path::new(&manifest_path);
             if fallback_path.exists() {
                 app = app.nest_service("/static", ServeDir::new(fallback_path));

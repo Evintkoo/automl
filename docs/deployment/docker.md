@@ -1,6 +1,6 @@
 # 🐳 Docker Deployment Guide
 
-This comprehensive guide covers deploying Kolosal AutoML using Docker and Docker Compose with production-ready configurations, security features, and monitoring.
+This comprehensive guide covers deploying AutoML using Docker and Docker Compose with production-ready configurations, security features, and monitoring.
 
 ## 🎯 Quick Start (5 Minutes)
 
@@ -13,8 +13,8 @@ This comprehensive guide covers deploying Kolosal AutoML using Docker and Docker
 
 ```bash
 # 1. Clone and enter directory
-git clone https://github.com/Genta-Technology/kolosal-automl.git
-cd kolosal-automl
+git clone https://github.com/Evintkoo/automl.git
+cd automl
 
 # 2. Quick development setup
 cp .env.example .env
@@ -63,7 +63,7 @@ graph TB
     end
 
     subgraph "🔧 Application Layer"  
-        API[🚀 Kolosal API<br/>Port 8000]
+        API[🚀 AutoML API<br/>Port 8000]
         WORKER[👥 API Workers<br/>Scalable]
     end
 
@@ -240,7 +240,7 @@ sudo cp /etc/letsencrypt/live/yourdomain.com/privkey.pem certs/server.key
 # Generate secure API keys
 python -c "
 import secrets
-keys = [f'genta_{secrets.token_urlsafe(32)}' for _ in range(3)]
+keys = [f'automl_{secrets.token_urlsafe(32)}' for _ in range(3)]
 print('API_KEYS=' + ','.join(keys))
 "
 
@@ -251,7 +251,7 @@ print('JWT_SECRET=' + secrets.token_urlsafe(64))
 "
 
 # Set in .env file
-echo "API_KEYS=genta_your_generated_keys_here" >> .env
+echo "API_KEYS=automl_your_generated_keys_here" >> .env
 echo "JWT_SECRET=your_generated_jwt_secret_here" >> .env
 ```
 
@@ -315,11 +315,11 @@ The API exposes custom metrics at `/metrics`:
 curl http://localhost:8000/metrics
 
 # Key metrics include:
-# - kolosal_api_requests_total
-# - kolosal_model_training_duration_seconds  
-# - kolosal_batch_processing_queue_size
-# - kolosal_memory_usage_bytes
-# - kolosal_active_models_count
+# - automl_api_requests_total
+# - automl_model_training_duration_seconds  
+# - automl_batch_processing_queue_size
+# - automl_memory_usage_bytes
+# - automl_active_models_count
 ```
 
 ## 🧪 Testing & Validation
@@ -363,7 +363,7 @@ locust -f scripts/load_test.py --host http://localhost:8000
 docker-compose ps
 
 # View service logs
-docker-compose logs kolosal-api
+docker-compose logs automl-api
 docker-compose logs redis
 docker-compose logs prometheus
 
@@ -372,7 +372,7 @@ docker stats
 
 # Network connectivity
 docker network ls
-docker network inspect kolosal-network
+docker network inspect automl-network
 ```
 
 ## 🔧 Scaling & Performance
@@ -381,7 +381,7 @@ docker network inspect kolosal-network
 
 ```bash
 # Scale API containers
-docker-compose up -d --scale kolosal-api=3
+docker-compose up -d --scale automl-api=3
 
 # Nginx automatically load balances requests
 # Verify load balancing:
@@ -393,7 +393,7 @@ curl -H "X-Show-Instance: true" http://localhost/health
 ```yaml
 # In compose.yaml - adjust based on your hardware
 services:
-  kolosal-api:
+  automl-api:
     deploy:
       resources:
         limits:
@@ -435,7 +435,7 @@ docker-compose pull
 docker-compose up -d
 
 # Backup data
-docker-compose exec postgres pg_dump -U kolosal kolosal_prod > backup.sql
+docker-compose exec postgres pg_dump -U automl automl_prod > backup.sql
 
 # Clean up resources
 docker system prune -f
@@ -452,10 +452,10 @@ DATE=$(date +%Y%m%d_%H%M%S)
 BACKUP_DIR="backups/${DATE}"
 
 mkdir -p ${BACKUP_DIR}
-docker-compose exec -T postgres pg_dump -U kolosal kolosal_prod > ${BACKUP_DIR}/database.sql
+docker-compose exec -T postgres pg_dump -U automl automl_prod > ${BACKUP_DIR}/database.sql
 cp -r models ${BACKUP_DIR}/
 cp -r configs ${BACKUP_DIR}/
-tar -czf backups/kolosal_backup_${DATE}.tar.gz -C backups ${DATE}
+tar -czf backups/automl_backup_${DATE}.tar.gz -C backups ${DATE}
 rm -rf ${BACKUP_DIR}
 EOF
 
@@ -493,16 +493,16 @@ docker-compose up -d
 
 ```bash
 # Check API container
-docker-compose logs kolosal-api
+docker-compose logs automl-api
 
 # Verify container is running
-docker-compose ps kolosal-api
+docker-compose ps automl-api
 
 # Test internal connectivity
-docker-compose exec kolosal-api curl localhost:8000/health
+docker-compose exec automl-api curl localhost:8000/health
 
 # Restart API service
-docker-compose restart kolosal-api
+docker-compose restart automl-api
 ```
 
 #### 3. **Memory Issues**
@@ -524,11 +524,11 @@ docker-compose up -d
 docker-compose logs postgres
 
 # Test connection
-docker-compose exec postgres pg_isready -U kolosal
+docker-compose exec postgres pg_isready -U automl
 
 # Reset database
 docker-compose down
-docker volume rm kolosal-automl_postgres-data
+docker volume rm automl_postgres-data
 docker-compose up -d
 ```
 
@@ -548,7 +548,7 @@ For issues not covered here:
 
 ```dockerfile
 # Extend the base image
-FROM kolosal-automl:latest
+FROM automl:latest
 
 # Add custom dependencies
 COPY requirements-custom.txt .
@@ -583,13 +583,13 @@ jobs:
 
 ```bash
 # Generate Kubernetes manifests
-docker-compose convert > kolosal-k8s.yaml
+docker-compose convert > automl-k8s.yaml
 
 # Deploy to Kubernetes
-kubectl apply -f kolosal-k8s.yaml
+kubectl apply -f automl-k8s.yaml
 
 # Or use Helm chart (if available)
-helm install kolosal-automl ./helm-chart
+helm install automl ./helm-chart
 ```
 
 ## 🎉 Success! You're Production Ready
@@ -618,6 +618,6 @@ Once your deployment is running:
 
 ---
 
-**Need help?** Check our [Troubleshooting Guide](troubleshooting.md) or [create an issue](https://github.com/Genta-Technology/kolosal-automl/issues) on GitHub.
+**Need help?** Check our [Troubleshooting Guide](troubleshooting.md) or [create an issue](https://github.com/Evintkoo/automl/issues) on GitHub.
 
 *Docker Deployment Guide v1.0 | Last updated: January 2025*

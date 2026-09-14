@@ -78,8 +78,8 @@ mod tests {
 - [ ] **Step 2: Run tests — expect they compile and pass**
 
 ```bash
-cargo test -p kolosal-automl test_percentile -- --nocapture 2>&1 | tail -10
-cargo test -p kolosal-automl test_ring_buffer_cap -- --nocapture 2>&1 | tail -5
+cargo test -p automl test_percentile -- --nocapture 2>&1 | tail -10
+cargo test -p automl test_ring_buffer_cap -- --nocapture 2>&1 | tail -5
 ```
 
 Expected: all four tests pass (pure logic, no AppState dependency).

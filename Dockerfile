@@ -1,5 +1,5 @@
 # ============================================================================
-# Kolosal AutoML - Multi-stage Docker Build for Railway
+# AutoML - Multi-stage Docker Build for Railway
 # ============================================================================
 # Stage 1: Build the Rust binary with full optimizations
 # Stage 2: Minimal runtime image with only what's needed
@@ -36,7 +36,7 @@ COPY src/ src/
 RUN touch src/main.rs src/lib.rs
 
 # Build the release binary with full optimizations (LTO, single codegen-unit)
-RUN cargo build --release --bin kolosal
+RUN cargo build --release --bin automl
 
 # ---------------------------------------------------------------------------
 # Stage 2: Runtime
@@ -54,32 +54,32 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create a non-root user for security
-RUN groupadd -r kolosal && useradd -r -g kolosal -m kolosal
+RUN groupadd -r automl && useradd -r -g automl -m automl
 
 WORKDIR /app
 
 # Copy the compiled binary from the builder stage
-COPY --from=builder /app/target/release/kolosal /app/kolosal
+COPY --from=builder /app/target/release/automl /app/automl
 
 # Copy the web UI static assets
-COPY kolosal-web/ /app/kolosal-web/
+COPY automl-web/ /app/automl-web/
 
 # Create runtime directories for data and models
 RUN mkdir -p /app/data /app/models && \
-    chown -R kolosal:kolosal /app
+    chown -R automl:automl /app
 
 # Switch to non-root user
-USER kolosal
+USER automl
 
 # ---------------------------------------------------------------------------
 # Environment Configuration
 # ---------------------------------------------------------------------------
 ENV API_HOST=0.0.0.0 \
-    STATIC_DIR=/app/kolosal-web/static \
+    STATIC_DIR=/app/automl-web/static \
     DATA_DIR=/app/data \
     MODELS_DIR=/app/models \
     MAX_UPLOAD_SIZE=104857600 \
-    RUST_LOG=kolosal=info,kolosal_automl=info,tower_http=info
+    RUST_LOG=automl=info,tower_http=info
 
 # Railway dynamically assigns the port via $PORT env var.
 # EXPOSE is informational; Railway routes traffic to $PORT automatically.
@@ -91,4 +91,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 # Shell form so $PORT is expanded at container start.
 # Railway sets PORT; if unset, falls back to 8080.
-CMD /app/kolosal serve --host 0.0.0.0 --port ${PORT:-8080}
+CMD /app/automl serve --host 0.0.0.0 --port ${PORT:-8080}

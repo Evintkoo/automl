@@ -1,6 +1,6 @@
 # 🌐 Web Interface Guide
 
-The Kolosal AutoML web interface provides a user-friendly way to interact with the platform without coding. Built with Gradio, it offers an intuitive experience for training models, making predictions, and managing your ML workflows.
+The AutoML web interface provides a user-friendly way to interact with the platform without coding. Built with Gradio, it offers an intuitive experience for training models, making predictions, and managing your ML workflows.
 
 ## 🚀 Accessing the Web Interface
 

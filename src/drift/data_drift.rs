@@ -1,6 +1,6 @@
 //! Data drift detection methods
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::drift::{DriftDetector, DriftResult};
 use ndarray::Array1;
 use serde::{Deserialize, Serialize};
@@ -50,7 +50,7 @@ impl Default for KolmogorovSmirnovTest {
 impl DriftDetector for KolmogorovSmirnovTest {
     fn detect(&self, reference: &Array1<f64>, test: &Array1<f64>) -> Result<DriftResult> {
         if reference.is_empty() || test.is_empty() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Empty arrays provided".to_string()
             ));
         }
@@ -172,7 +172,7 @@ impl Default for PopulationStabilityIndex {
 impl DriftDetector for PopulationStabilityIndex {
     fn detect(&self, reference: &Array1<f64>, test: &Array1<f64>) -> Result<DriftResult> {
         if reference.is_empty() || test.is_empty() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Empty arrays provided".to_string()
             ));
         }
@@ -288,7 +288,7 @@ impl Default for JensenShannonDivergence {
 impl DriftDetector for JensenShannonDivergence {
     fn detect(&self, reference: &Array1<f64>, test: &Array1<f64>) -> Result<DriftResult> {
         if reference.is_empty() || test.is_empty() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Empty arrays provided".to_string()
             ));
         }

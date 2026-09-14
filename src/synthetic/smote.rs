@@ -1,6 +1,6 @@
 //! SMOTE and variants
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::synthetic::{Sampler, ResampleResult, class_counts, class_indices};
 use ndarray::{Array1, Array2};
 use rand::prelude::*;
@@ -102,7 +102,7 @@ impl Sampler for SMOTE {
         let counts = class_counts(y);
         
         if counts.len() < 2 {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Need at least 2 classes for SMOTE".to_string()
             ));
         }
@@ -123,7 +123,7 @@ impl Sampler for SMOTE {
 
     fn resample(&self, x: &Array2<f64>, y: &Array1<i64>) -> Result<ResampleResult> {
         let targets = self.target_counts.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("SMOTE not fitted".to_string())
+            AutoMLError::ValidationError("SMOTE not fitted".to_string())
         })?;
 
         let mut rng = match self.seed {
@@ -289,7 +289,7 @@ impl Sampler for BorderlineSMOTE {
 
     fn resample(&self, x: &Array2<f64>, y: &Array1<i64>) -> Result<ResampleResult> {
         let targets = self.smote.target_counts.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Borderline SMOTE not fitted".to_string())
+            AutoMLError::ValidationError("Borderline SMOTE not fitted".to_string())
         })?;
 
         let mut rng = match self.smote.seed {

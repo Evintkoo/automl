@@ -1,6 +1,6 @@
 //! Integration test: Preprocessing pipeline end-to-end
 
-use kolosal_automl::preprocessing::{
+use automl::preprocessing::{
     DataPreprocessor, PreprocessingConfig, ScalerType, ImputeStrategy,
 };
 use polars::prelude::*;

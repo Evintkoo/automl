@@ -3,7 +3,7 @@
 //! AdaBoost builds an ensemble of weak learners (decision stumps), weighting
 //! misclassified samples more heavily in subsequent rounds.
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::{Array1, Array2};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -148,7 +148,7 @@ impl AdaBoostClassifier {
     pub fn fit(&mut self, x: &Array2<f64>, y: &Array1<f64>) -> Result<&mut Self> {
         let n_samples = x.nrows();
         if n_samples != y.len() {
-            return Err(KolosalError::ShapeError {
+            return Err(AutoMLError::ShapeError {
                 expected: format!("y length = {}", n_samples),
                 actual: format!("y length = {}", y.len()),
             });
@@ -214,7 +214,7 @@ impl AdaBoostClassifier {
 
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         let n_samples = x.nrows();
@@ -248,7 +248,7 @@ impl AdaBoostClassifier {
 
     pub fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         let n_samples = x.nrows();

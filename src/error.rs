@@ -1,13 +1,13 @@
-//! Error types for the Kolosal AutoML framework
+//! Error types for the AutoML framework
 
 use thiserror::Error;
 
-/// Result type alias for Kolosal operations
-pub type Result<T> = std::result::Result<T, KolosalError>;
+/// Result type alias for AutoML operations
+pub type Result<T> = std::result::Result<T, AutoMLError>;
 
-/// Main error type for the Kolosal framework
+/// Main error type for the AutoML framework
 #[derive(Error, Debug)]
-pub enum KolosalError {
+pub enum AutoMLError {
     #[error("Data error: {0}")]
     DataError(String),
 
@@ -85,21 +85,21 @@ pub enum KolosalError {
     ProvenanceError(String),
 }
 
-impl From<polars::error::PolarsError> for KolosalError {
+impl From<polars::error::PolarsError> for AutoMLError {
     fn from(err: polars::error::PolarsError) -> Self {
-        KolosalError::DataError(err.to_string())
+        AutoMLError::DataError(err.to_string())
     }
 }
 
-impl From<serde_json::Error> for KolosalError {
+impl From<serde_json::Error> for AutoMLError {
     fn from(err: serde_json::Error) -> Self {
-        KolosalError::SerializationError(err.to_string())
+        AutoMLError::SerializationError(err.to_string())
     }
 }
 
-impl From<ndarray::ShapeError> for KolosalError {
+impl From<ndarray::ShapeError> for AutoMLError {
     fn from(err: ndarray::ShapeError) -> Self {
-        KolosalError::ShapeError {
+        AutoMLError::ShapeError {
             expected: format!("compatible shape (kind: {:?})", err.kind()),
             actual: err.to_string(),
         }
@@ -112,14 +112,14 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = KolosalError::DataError("test error".to_string());
+        let err = AutoMLError::DataError("test error".to_string());
         assert_eq!(err.to_string(), "Data error: test error");
     }
 
     #[test]
     fn test_error_from_io() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
-        let err: KolosalError = io_err.into();
-        assert!(matches!(err, KolosalError::IoError(_)));
+        let err: AutoMLError = io_err.into();
+        assert!(matches!(err, AutoMLError::IoError(_)));
     }
 }

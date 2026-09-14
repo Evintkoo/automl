@@ -1,9 +1,9 @@
 //! Integration tests for data processing: preprocessing, cleaning, and data loading
 
-use kolosal_automl::preprocessing::{
+use automl::preprocessing::{
     DataPreprocessor, PreprocessingConfig, ScalerType, ImputeStrategy,
 };
-use kolosal_automl::training::{TrainEngine, TrainingConfig, TaskType, ModelType};
+use automl::training::{TrainEngine, TrainingConfig, TaskType, ModelType};
 use polars::prelude::*;
 
 // ============================================================================
@@ -277,7 +277,7 @@ fn test_cli_load_csv_data() {
     tmp.as_file().flush().unwrap();
 
     let path = tmp.path().to_path_buf();
-    let df = kolosal_automl::cli::load_data(&path);
+    let df = automl::cli::load_data(&path);
     assert!(df.is_ok(), "CSV load should succeed");
     let df = df.unwrap();
     assert_eq!(df.height(), 20);

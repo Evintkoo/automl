@@ -1,6 +1,6 @@
 //! ADASYN (Adaptive Synthetic Sampling)
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::synthetic::{Sampler, ResampleResult, class_counts, class_indices};
 use ndarray::{Array1, Array2};
 use rand::prelude::*;
@@ -108,7 +108,7 @@ impl Sampler for ADASYN {
         let counts = class_counts(y);
         
         if counts.len() < 2 {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Need at least 2 classes for ADASYN".to_string()
             ));
         }

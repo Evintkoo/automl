@@ -1,6 +1,6 @@
 //! Feature drift monitoring
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::drift::DriftDetector;
 use crate::drift::data_drift::{KolmogorovSmirnovTest, PopulationStabilityIndex, JensenShannonDivergence};
 use ndarray::{Array1, Array2};
@@ -187,7 +187,7 @@ impl FeatureDriftMonitor {
     /// Fit on reference data
     pub fn fit(&mut self, x_ref: &Array2<f64>) -> Result<()> {
         if x_ref.ncols() != self.feature_names.len() {
-            return Err(KolosalError::ValidationError(format!(
+            return Err(AutoMLError::ValidationError(format!(
                 "Expected {} features, got {}",
                 self.feature_names.len(),
                 x_ref.ncols()
@@ -210,12 +210,12 @@ impl FeatureDriftMonitor {
     /// Detect drift between reference and test data
     pub fn detect(&self, x_test: &Array2<f64>) -> Result<DriftReport> {
         let ref_data = self.ref_data.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Monitor not fitted".to_string())
+            AutoMLError::ValidationError("Monitor not fitted".to_string())
         })?;
         let ref_stats = self.ref_stats.as_ref().unwrap();
 
         if x_test.ncols() != self.feature_names.len() {
-            return Err(KolosalError::ValidationError(format!(
+            return Err(AutoMLError::ValidationError(format!(
                 "Expected {} features, got {}",
                 self.feature_names.len(),
                 x_test.ncols()

@@ -1,9 +1,9 @@
 //! Basic Training Example
 //!
-//! Demonstrates how to train a model using the Kolosal AutoML framework.
+//! Demonstrates how to train a model using the AutoML framework.
 
 use polars::prelude::*;
-use kolosal_automl::training::{TrainEngine, TrainingConfig, TaskType, ModelType};
+use automl::training::{TrainEngine, TrainingConfig, TaskType, ModelType};
 
 fn main() -> anyhow::Result<()> {
     // Create sample data

@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn test_save_load_configs() {
         let optimizer = DeviceOptimizer::new();
-        let tmp = std::env::temp_dir().join("kolosal_test_device_configs.json");
+        let tmp = std::env::temp_dir().join("automl_test_device_configs.json");
         optimizer.save_configs(&tmp).expect("save failed");
         let loaded = DeviceOptimizer::load_configs(&tmp).expect("load failed");
         assert_eq!(loaded.batch.max_batch_size, optimizer.get_optimal_batch_config().max_batch_size);

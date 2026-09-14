@@ -1,6 +1,6 @@
 //! Random sampling methods
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::synthetic::{Sampler, ResampleResult, class_counts, class_indices};
 use ndarray::{Array1, Array2};
 use rand::prelude::*;
@@ -64,7 +64,7 @@ impl Sampler for RandomOverSampler {
 
     fn resample(&self, x: &Array2<f64>, y: &Array1<i64>) -> Result<ResampleResult> {
         let targets = self.target_counts.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Sampler not fitted".to_string())
+            AutoMLError::ValidationError("Sampler not fitted".to_string())
         })?;
 
         let mut rng = match self.seed {

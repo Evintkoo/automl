@@ -1,6 +1,6 @@
 //! Automated pipeline execution
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::autopipeline::{
     composer::{
         ComposerConfig, ImputeStrategy,
@@ -141,7 +141,7 @@ impl AutoPipeline {
     /// Fit preprocessing on data
     pub fn fit_preprocessing(&mut self, x: &Array2<f64>, _y: &Array1<f64>) -> Result<Array2<f64>> {
         let blueprint = self.blueprint.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Pipeline not analyzed. Call analyze() first.".to_string())
+            AutoMLError::ValidationError("Pipeline not analyzed. Call analyze() first.".to_string())
         })?;
 
         let mut preprocessor = FittedPreprocessor::new(x.ncols());
@@ -358,7 +358,7 @@ impl AutoPipeline {
     /// Transform new data using fitted preprocessing
     pub fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         let preprocessor = self.fitted_preprocessor.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Preprocessing not fitted. Call fit_preprocessing() first.".to_string())
+            AutoMLError::ValidationError("Preprocessing not fitted. Call fit_preprocessing() first.".to_string())
         })?;
 
         let mut x_transformed = x.clone();

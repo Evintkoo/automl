@@ -2,7 +2,7 @@
  * Extended benchmark suite: Tests all Rust API endpoints, AutoML features,
  * data analysis, model management, visualizations, ML pipelines, and more.
  *
- * These tests exercise the full breadth of the Rust Kolosal AutoML platform
+ * These tests exercise the full breadth of the Rust AutoML platform
  * and compare with the Python/Gradio version where applicable.
  */
 import { test, expect, Page } from '@playwright/test';

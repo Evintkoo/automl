@@ -1,6 +1,6 @@
 //! Text feature extraction
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -151,7 +151,7 @@ impl CountVectorizer {
 
     pub fn transform(&self, documents: &[String]) -> Result<Array2<f64>> {
         if self.vocabulary.is_empty() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Vectorizer not fitted".to_string()
             ));
         }
@@ -263,7 +263,7 @@ impl TfidfVectorizer {
 
     pub fn transform(&self, documents: &[String]) -> Result<Array2<f64>> {
         let idf = self.idf.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Vectorizer not fitted".to_string())
+            AutoMLError::ValidationError("Vectorizer not fitted".to_string())
         })?;
 
         let mut tf_matrix = self.count_vectorizer.transform(documents)?;

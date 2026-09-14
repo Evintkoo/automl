@@ -1,6 +1,6 @@
 //! Feature interaction generation
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::feature_engineering::FeatureTransformer;
 use ndarray::Array2;
 use serde::{Deserialize, Serialize};
@@ -183,7 +183,7 @@ impl FeatureTransformer for FeatureInteractions {
         use rayon::prelude::*;
 
         let crossings = self.crossings.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Transformer not fitted".to_string())
+            AutoMLError::ValidationError("Transformer not fitted".to_string())
         })?;
 
         let n_original = if self.include_original { x.ncols() } else { 0 };
@@ -351,7 +351,7 @@ impl FeatureTransformer for AutoCrossing {
     fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         self.generator
             .as_ref()
-            .ok_or_else(|| KolosalError::ValidationError("Transformer not fitted".to_string()))?
+            .ok_or_else(|| AutoMLError::ValidationError("Transformer not fitted".to_string()))?
             .transform(x)
     }
 

@@ -1,6 +1,6 @@
 //! Partial Dependence Plots and Individual Conditional Expectation
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 
@@ -130,7 +130,7 @@ where
     /// Compute ICE for a single feature
     pub fn compute_ice(&self, x: &Array2<f64>, feature_index: usize) -> Result<ICEResult> {
         if feature_index >= x.ncols() {
-            return Err(KolosalError::ValidationError(format!(
+            return Err(AutoMLError::ValidationError(format!(
                 "Feature index {} out of bounds (n_features={})",
                 feature_index,
                 x.ncols()
@@ -204,7 +204,7 @@ where
         feature_2: usize,
     ) -> Result<PDP2DResult> {
         if feature_1 >= x.ncols() || feature_2 >= x.ncols() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Feature index out of bounds".to_string(),
             ));
         }

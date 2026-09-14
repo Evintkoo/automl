@@ -1,6 +1,6 @@
 //! Calibration metrics
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::Array1;
 use serde::{Deserialize, Serialize};
 
@@ -89,7 +89,7 @@ pub fn maximum_calibration_error(
 /// Brier = (1/n) * sum_i (p_i - y_i)^2
 pub fn brier_score(probs: &Array1<f64>, labels: &Array1<f64>) -> Result<f64> {
     if probs.len() != labels.len() {
-        return Err(KolosalError::ValidationError(
+        return Err(AutoMLError::ValidationError(
             "Probabilities and labels must have same length".to_string(),
         ));
     }
@@ -111,7 +111,7 @@ pub fn reliability_diagram(
     n_bins: usize,
 ) -> Result<ReliabilityDiagram> {
     if probs.len() != labels.len() {
-        return Err(KolosalError::ValidationError(
+        return Err(AutoMLError::ValidationError(
             "Probabilities and labels must have same length".to_string(),
         ));
     }
@@ -208,7 +208,7 @@ pub fn adaptive_expected_calibration_error(
     n_bins: usize,
 ) -> Result<f64> {
     if probs.len() != labels.len() {
-        return Err(KolosalError::ValidationError(
+        return Err(AutoMLError::ValidationError(
             "Probabilities and labels must have same length".to_string(),
         ));
     }

@@ -1,12 +1,12 @@
 //! Integration test: Full pipeline (load → preprocess → train → predict)
 
-use kolosal_automl::preprocessing::{DataPreprocessor, PreprocessingConfig, ScalerType};
-use kolosal_automl::training::{TrainEngine, TrainingConfig, TaskType, ModelType};
-use kolosal_automl::tracking::ExperimentTracker;
-use kolosal_automl::batch::DynamicBatcher;
-use kolosal_automl::cache::LruTtlCache;
-use kolosal_automl::quantization::{Quantizer, QuantizationConfig};
-use kolosal_automl::streaming::{StreamingPipeline, StreamConfig};
+use automl::preprocessing::{DataPreprocessor, PreprocessingConfig, ScalerType};
+use automl::training::{TrainEngine, TrainingConfig, TaskType, ModelType};
+use automl::tracking::ExperimentTracker;
+use automl::batch::DynamicBatcher;
+use automl::cache::LruTtlCache;
+use automl::quantization::{Quantizer, QuantizationConfig};
+use automl::streaming::{StreamingPipeline, StreamConfig};
 use polars::prelude::*;
 
 fn create_classification_dataset() -> DataFrame {
@@ -153,7 +153,7 @@ fn test_full_pipeline_with_report() {
 
 #[test]
 fn test_experiment_tracking_integration() {
-    let tmp_dir = std::env::temp_dir().join(format!("kolosal_test_exp_{}", std::process::id()));
+    let tmp_dir = std::env::temp_dir().join(format!("automl_test_exp_{}", std::process::id()));
     let tracker = ExperimentTracker::with_dir(&tmp_dir);
     let exp_id = tracker.create_experiment("test_experiment");
 
@@ -221,7 +221,7 @@ fn test_streaming_pipeline_integration() {
 
 #[test]
 fn test_dynamic_batcher_integration() {
-    let config = kolosal_automl::batch::BatcherConfig {
+    let config = automl::batch::BatcherConfig {
         max_batch_size: 4,
         max_wait_time_ms: 100,
         max_queue_size: 100,

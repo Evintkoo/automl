@@ -504,7 +504,7 @@ function generateReportHTML(rustData: ScalingDataPoint[], pythonData: ScalingDat
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Kolosal AutoML - Dataset Scaling Benchmark</title>
+  <title>AutoML - Dataset Scaling Benchmark</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -528,7 +528,7 @@ function generateReportHTML(rustData: ScalingDataPoint[], pythonData: ScalingDat
   </style>
 </head>
 <body>
-  <h1>Kolosal AutoML &mdash; Dataset Scaling Benchmark</h1>
+  <h1>AutoML &mdash; Dataset Scaling Benchmark</h1>
   <p class="subtitle"><span class="rust">Rust</span> vs <span class="python">Python/Gradio</span> &mdash; Performance at increasing dataset sizes</p>
 
   <div class="grid">

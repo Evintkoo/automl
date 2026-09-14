@@ -218,7 +218,7 @@ mod tests {
     
     #[test]
     fn test_local_storage_save_load() {
-        let temp_dir = std::env::temp_dir().join("kolosal_test_storage");
+        let temp_dir = std::env::temp_dir().join("automl_test_storage");
         let storage = LocalStorage::new(temp_dir.clone());
         
         // Create test experiment

@@ -7,7 +7,7 @@
 //! - ISO/IEC TR 24027:2021 Clauses 6-8: Bias identification, measurement, mitigation
 //! - ISO/IEC 42001:2023 Annex D: AI impact assessment
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::Array1;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -209,7 +209,7 @@ impl FairnessEvaluator {
         protected_attrs: &HashMap<String, Vec<String>>,
     ) -> Result<FairnessReport> {
         if predictions.len() != actuals.len() {
-            return Err(KolosalError::FairnessError(
+            return Err(AutoMLError::FairnessError(
                 "Predictions and actuals must have the same length".to_string(),
             ));
         }
@@ -222,7 +222,7 @@ impl FairnessEvaluator {
 
         for (attr_name, attr_values) in protected_attrs {
             if attr_values.len() != n {
-                return Err(KolosalError::FairnessError(format!(
+                return Err(AutoMLError::FairnessError(format!(
                     "Attribute '{}' has {} values, expected {}",
                     attr_name,
                     attr_values.len(),

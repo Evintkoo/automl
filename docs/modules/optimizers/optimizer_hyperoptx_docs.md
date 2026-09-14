@@ -4,7 +4,7 @@
 
 The **HyperOptX** (Advanced Hyperparameter Optimization with Multi-Stage Optimization and Meta-Learning) class provides a sophisticated approach to hyperparameter optimization for machine learning models. It combines multiple advanced techniques including multi-fidelity optimization, surrogate modeling, Thompson sampling, and evolutionary strategies to efficiently search for optimal hyperparameter configurations.
 
-HyperOptX is part of the kolosal AutoML optimization suite and distinguishes itself from simpler hyperparameter optimization techniques by providing:
+HyperOptX is part of the AutoML optimization suite and distinguishes itself from simpler hyperparameter optimization techniques by providing:
 
 1. **Multi-fidelity optimization** with adaptive resource allocation
 2. **Meta-model selection** for surrogate model choice

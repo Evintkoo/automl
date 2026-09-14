@@ -2345,7 +2345,7 @@ git commit -m "feat(server): add GET /api/quality/report/:model_id and quality f
 ```rust
 //! Integration test: QualityPipeline gates produce valid outputs on Iris-like data.
 
-use kolosal_automl::quality::{
+use automl::quality::{
     QualityContext,
     pre_training::{LeakageDetector, DistributionFingerprint, PreTrainingGate},
     training::{AlgorithmSelector, CvStrategyChooser, CvStrategy},
@@ -2415,7 +2415,7 @@ fn test_cv_strategy_for_iris_uses_repeated() {
 
 #[test]
 fn test_pareto_front_with_iris_trials() {
-    use kolosal_automl::quality::ParetoPoint;
+    use automl::quality::ParetoPoint;
     let trials = vec![
         ParetoPoint { metric_score: 0.95, latency_ms: 5.0, trial_id: 0 },
         ParetoPoint { metric_score: 0.92, latency_ms: 2.0, trial_id: 1 },
@@ -2526,7 +2526,7 @@ Expected: no regressions — same passing tests as before this branch.
 - [ ] **Step 4: Verify quality report endpoint compiles and routes are reachable**
 
 ```bash
-cargo check --bin kolosal_automl 2>&1 | grep "^error" | head -10
+cargo check --bin automl 2>&1 | grep "^error" | head -10
 ```
 
 Expected: no errors.

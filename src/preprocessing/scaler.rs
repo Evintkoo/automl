@@ -1,6 +1,6 @@
 //! Feature scaling implementations
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use polars::prelude::*;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -89,7 +89,7 @@ impl Scaler {
         for col_name in columns {
             let column = df
                 .column(col_name)
-                .map_err(|_| KolosalError::FeatureNotFound(col_name.to_string()))?;
+                .map_err(|_| AutoMLError::FeatureNotFound(col_name.to_string()))?;
             let series = column.as_materialized_series();
 
             let params = self.compute_params(series)?;
@@ -103,7 +103,7 @@ impl Scaler {
     /// Transform the data
     pub fn transform(&self, df: &DataFrame) -> Result<DataFrame> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         // Parallel: scale all columns independently
@@ -133,7 +133,7 @@ impl Scaler {
             .map(|(i, &s)| (s, i))
             .collect();
         all_cols.sort_by_key(|c| pos.get(c.name().as_str()).copied().unwrap_or(usize::MAX));
-        DataFrame::new(all_cols).map_err(|e| KolosalError::DataError(e.to_string()))
+        DataFrame::new(all_cols).map_err(|e| AutoMLError::DataError(e.to_string()))
     }
 
     /// Fit and transform in one step
@@ -145,7 +145,7 @@ impl Scaler {
     /// Inverse transform the data
     pub fn inverse_transform(&self, df: &DataFrame) -> Result<DataFrame> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         // Parallel: unscale all columns independently
@@ -174,13 +174,13 @@ impl Scaler {
             .map(|(i, &s)| (s, i))
             .collect();
         all_cols.sort_by_key(|c| pos.get(c.name().as_str()).copied().unwrap_or(usize::MAX));
-        DataFrame::new(all_cols).map_err(|e| KolosalError::DataError(e.to_string()))
+        DataFrame::new(all_cols).map_err(|e| AutoMLError::DataError(e.to_string()))
     }
 
     fn compute_params(&self, series: &Series) -> Result<ScalerParams> {
         let ca = series
             .f64()
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         match self.scaler_type {
             ScalerType::Standard => {
@@ -243,7 +243,7 @@ impl Scaler {
     fn scale_series(&self, series: &Series, params: &ScalerParams) -> Result<Series> {
         let ca = series
             .f64()
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         let (range_min, range_max) = self.feature_range;
         let is_minmax = self.scaler_type == ScalerType::MinMax;
@@ -280,7 +280,7 @@ impl Scaler {
     fn unscale_series(&self, series: &Series, params: &ScalerParams) -> Result<Series> {
         let ca = series
             .f64()
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         let (range_min, range_max) = self.feature_range;
         let is_minmax = self.scaler_type == ScalerType::MinMax;

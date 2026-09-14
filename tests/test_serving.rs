@@ -1,7 +1,7 @@
 //! Integration test: End-to-end model serving flow
 //! Tests: load data → train → list models → predict → stats → cache evict
 
-use kolosal_automl::server::{AppState, ServerConfig, create_router};
+use automl::server::{AppState, ServerConfig, create_router};
 use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -12,8 +12,8 @@ fn serve_test_app() -> (axum::Router, Arc<AppState>) {
         host: "127.0.0.1".to_string(),
         port: 0,
         static_dir: None,
-        data_dir: "/tmp/kolosal-test-serve-data".to_string(),
-        models_dir: "/tmp/kolosal-test-serve-models".to_string(),
+        data_dir: "/tmp/automl-test-serve-data".to_string(),
+        models_dir: "/tmp/automl-test-serve-models".to_string(),
         max_upload_size: 10 * 1024 * 1024,
     };
     std::fs::create_dir_all(&config.data_dir).ok();

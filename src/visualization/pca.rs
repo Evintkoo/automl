@@ -58,14 +58,14 @@ impl Pca {
     pub fn fit_transform(&self, data: &[Vec<f64>]) -> crate::error::Result<PcaResult> {
         let n = data.len();
         if n < 2 {
-            return Err(crate::error::KolosalError::DataError(
+            return Err(crate::error::AutoMLError::DataError(
                 "PCA requires at least 2 samples".to_string(),
             ));
         }
 
         let d = data[0].len();
         if d < 1 {
-            return Err(crate::error::KolosalError::DataError(
+            return Err(crate::error::AutoMLError::DataError(
                 "PCA requires at least 1 feature".to_string(),
             ));
         }

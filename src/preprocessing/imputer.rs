@@ -1,6 +1,6 @@
 //! Missing value imputation strategies
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -57,7 +57,7 @@ impl Imputer {
         for col_name in columns {
             let series = df
                 .column(col_name)
-                .map_err(|_| KolosalError::FeatureNotFound(col_name.to_string()))?;
+                .map_err(|_| AutoMLError::FeatureNotFound(col_name.to_string()))?;
 
             let fill_value = self.compute_fill_value(series.as_materialized_series())?;
             self.fill_values.insert(col_name.to_string(), fill_value);
@@ -70,7 +70,7 @@ impl Imputer {
     /// Transform the data by imputing missing values
     pub fn transform(&self, df: &DataFrame) -> Result<DataFrame> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         let mut result = df.clone();
@@ -81,7 +81,7 @@ impl Imputer {
                 let filled = self.fill_series(series, fill_value)?;
                 result = result
                     .with_column(filled)
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?
                     .clone();
             }
         }
@@ -162,7 +162,7 @@ impl Imputer {
             ImputeStrategy::Mean => {
                 let mean = series
                     .f64()
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?
                     .mean()
                     .unwrap_or(0.0);
                 Ok(ImputeValue::Numeric(mean))
@@ -170,7 +170,7 @@ impl Imputer {
             ImputeStrategy::Median => {
                 let median = series
                     .f64()
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?
                     .median()
                     .unwrap_or(0.0);
                 Ok(ImputeValue::Numeric(median))
@@ -196,7 +196,7 @@ impl Imputer {
             ImputeValue::Numeric(val) => {
                 let ca = series
                     .f64()
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?;
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?;
                 
                 // Manually fill nulls
                 let filled: Float64Chunked = ca
@@ -209,7 +209,7 @@ impl Imputer {
             ImputeValue::String(val) => {
                 let ca = series
                     .str()
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?;
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?;
                 
                 // Manually fill nulls for strings
                 let filled: StringChunked = ca

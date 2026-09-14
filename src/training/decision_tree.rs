@@ -1,6 +1,6 @@
 //! Decision tree implementation
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::{Array1, Array2};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -181,14 +181,14 @@ impl DecisionTree {
         let n_features = x.ncols();
 
         if n_samples != y.len() {
-            return Err(KolosalError::ShapeError {
+            return Err(AutoMLError::ShapeError {
                 expected: format!("y length = {}", n_samples),
                 actual: format!("y length = {}", y.len()),
             });
         }
 
         if n_samples < self.min_samples_split {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 format!("Need at least {} samples, got {}", self.min_samples_split, n_samples)
             ));
         }
@@ -528,7 +528,7 @@ impl DecisionTree {
     /// Make predictions
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         let root = self.root.as_ref()
-            .ok_or(KolosalError::ModelNotFitted)?;
+            .ok_or(AutoMLError::ModelNotFitted)?;
 
         let predictions: Vec<f64> = (0..x.nrows())
             .map(|i| {

@@ -3,7 +3,7 @@
 //! Demonstrates data preprocessing with scaling, encoding, and imputation.
 
 use polars::prelude::*;
-use kolosal_automl::preprocessing::{
+use automl::preprocessing::{
     DataPreprocessor, PreprocessingConfig, 
     ScalerType, EncoderType, ImputeStrategy,
 };

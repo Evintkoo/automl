@@ -1,6 +1,6 @@
 //! Time series feature engineering
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 
@@ -424,7 +424,7 @@ impl DateTimeFeatures {
         }
 
         if features.is_empty() || features[0].is_empty() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "No features generated".to_string(),
             ));
         }
@@ -433,7 +433,7 @@ impl DateTimeFeatures {
         let data: Vec<f64> = features.into_iter().flatten().collect();
         
         Array2::from_shape_vec((n, n_features), data).map_err(|e| {
-            KolosalError::ValidationError(format!("Failed to create feature array: {}", e))
+            AutoMLError::ValidationError(format!("Failed to create feature array: {}", e))
         })
     }
 }

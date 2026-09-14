@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::{Write, BufWriter};
 use std::path::Path;
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 
 /// ONNX configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,7 +28,7 @@ impl Default for ONNXConfig {
     fn default() -> Self {
         Self {
             opset_version: 15,
-            producer_name: "Kolosal AutoML".to_string(),
+            producer_name: "AutoML".to_string(),
             producer_version: env!("CARGO_PKG_VERSION").to_string(),
             description: String::new(),
         }
@@ -369,12 +369,12 @@ impl ONNXExporter {
         };
 
         let file = File::create(path.as_ref()).map_err(|e| {
-            KolosalError::DataError(format!("Failed to create file: {}", e))
+            AutoMLError::DataError(format!("Failed to create file: {}", e))
         })?;
         let writer = BufWriter::new(file);
 
         serde_json::to_writer_pretty(writer, &onnx_model).map_err(|e| {
-            KolosalError::SerializationError(format!("Failed to write ONNX JSON: {}", e))
+            AutoMLError::SerializationError(format!("Failed to write ONNX JSON: {}", e))
         })?;
 
         Ok(())
@@ -387,7 +387,7 @@ impl ONNXExporter {
         path: impl AsRef<Path>,
     ) -> Result<()> {
         let file = File::create(path.as_ref()).map_err(|e| {
-            KolosalError::DataError(format!("Failed to create weights file: {}", e))
+            AutoMLError::DataError(format!("Failed to create weights file: {}", e))
         })?;
         let mut writer = BufWriter::new(file);
 
@@ -396,28 +396,28 @@ impl ONNXExporter {
                 InitializerData::Float(data) => {
                     for &val in data {
                         writer.write_all(&val.to_le_bytes()).map_err(|e| {
-                            KolosalError::DataError(format!("Failed to write: {}", e))
+                            AutoMLError::DataError(format!("Failed to write: {}", e))
                         })?;
                     }
                 }
                 InitializerData::Double(data) => {
                     for &val in data {
                         writer.write_all(&val.to_le_bytes()).map_err(|e| {
-                            KolosalError::DataError(format!("Failed to write: {}", e))
+                            AutoMLError::DataError(format!("Failed to write: {}", e))
                         })?;
                     }
                 }
                 InitializerData::Int32(data) => {
                     for &val in data {
                         writer.write_all(&val.to_le_bytes()).map_err(|e| {
-                            KolosalError::DataError(format!("Failed to write: {}", e))
+                            AutoMLError::DataError(format!("Failed to write: {}", e))
                         })?;
                     }
                 }
                 InitializerData::Int64(data) => {
                     for &val in data {
                         writer.write_all(&val.to_le_bytes()).map_err(|e| {
-                            KolosalError::DataError(format!("Failed to write: {}", e))
+                            AutoMLError::DataError(format!("Failed to write: {}", e))
                         })?;
                     }
                 }

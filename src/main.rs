@@ -1,16 +1,16 @@
-//! Kolosal AutoML - Main Entry Point
+//! AutoML - Main Entry Point
 //!
 //! A high-performance AutoML framework in Rust with CLI and server modes.
 
 use clap::Parser;
-use kolosal_automl::cli::{Cli, Commands, cmd_train, cmd_predict, cmd_preprocess, cmd_benchmark, cmd_info, cmd_serve};
+use automl::cli::{Cli, Commands, cmd_train, cmd_predict, cmd_preprocess, cmd_benchmark, cmd_info, cmd_serve};
 use tracing::{info, error};
 
 fn init_logging() {
     use tracing_subscriber::{fmt, EnvFilter};
 
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("kolosal=info,kolosal_automl=info,tower_http=info"));
+        .unwrap_or_else(|_| EnvFilter::new("automl=info,automl=info,tower_http=info"));
 
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
 
@@ -41,12 +41,12 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    info!(version = env!("CARGO_PKG_VERSION"), "Kolosal AutoML starting");
+    info!(version = env!("CARGO_PKG_VERSION"), "AutoML starting");
 
     let result = run(cli).await;
 
     if let Err(ref e) = result {
-        error!(error = %e, "Kolosal AutoML exited with error");
+        error!(error = %e, "AutoML exited with error");
     }
 
     result
@@ -89,6 +89,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
     }
 
-    info!("Kolosal AutoML finished");
+    info!("AutoML finished");
     Ok(())
 }

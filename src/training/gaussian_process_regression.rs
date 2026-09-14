@@ -3,7 +3,7 @@
 //! Non-parametric Bayesian regression that provides uncertainty estimates.
 //! Uses RBF (squared exponential) kernel with Cholesky decomposition for prediction.
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 
@@ -42,7 +42,7 @@ impl GaussianProcessRegressor {
 
     pub fn fit(&mut self, x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
         let n = x.nrows();
-        if n == 0 { return Err(KolosalError::TrainingError("Empty dataset".into())); }
+        if n == 0 { return Err(AutoMLError::TrainingError("Empty dataset".into())); }
 
         // Subsample if too large
         let (x_sub, y_sub) = if n > self.config.max_training_size {
@@ -106,7 +106,7 @@ impl GaussianProcessRegressor {
     }
 
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
-        let x_train = self.x_train.as_ref().ok_or_else(|| KolosalError::TrainingError("Model not fitted".into()))?;
+        let x_train = self.x_train.as_ref().ok_or_else(|| AutoMLError::TrainingError("Model not fitted".into()))?;
         let alpha = self.alpha.as_ref().unwrap();
 
         let predictions = x.rows().into_iter().map(|row| {
@@ -122,7 +122,7 @@ impl GaussianProcessRegressor {
 
     /// Predict with uncertainty (mean, std)
     pub fn predict_with_std(&self, x: &Array2<f64>) -> Result<(Array1<f64>, Array1<f64>)> {
-        let x_train = self.x_train.as_ref().ok_or_else(|| KolosalError::TrainingError("Model not fitted".into()))?;
+        let x_train = self.x_train.as_ref().ok_or_else(|| AutoMLError::TrainingError("Model not fitted".into()))?;
         let alpha = self.alpha.as_ref().unwrap();
         let n_train = x_train.nrows();
 
@@ -179,7 +179,7 @@ fn cholesky_solve(a: &Array2<f64>, b: &Array1<f64>) -> Result<(Array1<f64>, Arra
             if i == j {
                 let val = a[[i, i]] - sum;
                 if val <= 0.0 {
-                    return Err(KolosalError::TrainingError("Matrix not positive definite".into()));
+                    return Err(AutoMLError::TrainingError("Matrix not positive definite".into()));
                 }
                 l[[i, j]] = val.sqrt();
             } else {

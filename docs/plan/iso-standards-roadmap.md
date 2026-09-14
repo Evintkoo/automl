@@ -1,10 +1,10 @@
-# Kolosal AutoML — ISO Standards Compliance Roadmap
+# AutoML — ISO Standards Compliance Roadmap
 
 > Local-only document. Tracked via `.git/info/exclude`, never committed.
 
 ## Overview
 
-Kolosal AutoML is a pure-Rust AutoML framework (v0.5.0, ~52,885 LOC, 425 tests)
+AutoML is a pure-Rust AutoML framework (v0.5.0, ~52,885 LOC, 425 tests)
 with 23 modules covering ML training (17+ models), preprocessing, hyperparameter
 optimization, inference, explainability, drift detection, and a 40+ endpoint REST
 API (Axum). This roadmap maps the codebase to applicable ISO standards and defines
@@ -204,7 +204,7 @@ concrete implementation tasks to close compliance gaps.
 #### 3.1.1 — AIMS Policy Document
 - **File:** `docs/plan/governance/aims-policy.md`
 - **Content:**
-  - Scope: Kolosal AutoML as an AI system provider
+  - Scope: AutoML as an AI system provider
   - AI principles: fairness, transparency, accountability, safety, privacy
   - Roles: AI system owner, data steward, model reviewer, security officer
   - Risk appetite: acceptable levels for bias, drift, security incidents
@@ -261,7 +261,7 @@ concrete implementation tasks to close compliance gaps.
 - **Align with ISO 22989 terms:**
   - AI system, ML model, training data, test data, feature, label, prediction
   - Bias, fairness, explainability, drift, calibration, robustness
-  - Map each term to Kolosal struct/module names
+  - Map each term to AutoML struct/module names
 - **ISO refs:** 22989 full vocabulary
 
 ---
@@ -463,7 +463,7 @@ pub struct ModelDetails {
     pub version: String,
     pub model_type: String,
     pub task_type: String,  // classification / regression
-    pub framework: String,  // "Kolosal AutoML v0.5.0"
+    pub framework: String,  // "AutoML v0.5.0"
     pub hyperparameters: serde_json::Value,
 }
 
@@ -587,7 +587,7 @@ pub enum AuditEventType {
 ```rust
 pub struct EnvironmentFingerprint {
     pub rust_version: String,
-    pub kolosal_version: String,
+    pub automl_version: String,
     pub os: String,
     pub arch: String,
     pub cpu_features: Vec<String>,  // from existing src/device/
@@ -766,12 +766,12 @@ pub struct ServiceLevelObjectives {
 - **Extend:** `src/monitoring/mod.rs`
 - **New endpoint:** GET `/metrics` — Prometheus exposition format
 - **Metrics to export:**
-  - `kolosal_prediction_latency_seconds` (histogram)
-  - `kolosal_predictions_total` (counter)
-  - `kolosal_prediction_errors_total` (counter)
-  - `kolosal_model_drift_score` (gauge)
-  - `kolosal_fairness_disparate_impact` (gauge)
-  - `kolosal_data_quality_score` (gauge)
+  - `automl_prediction_latency_seconds` (histogram)
+  - `automl_predictions_total` (counter)
+  - `automl_prediction_errors_total` (counter)
+  - `automl_model_drift_score` (gauge)
+  - `automl_fairness_disparate_impact` (gauge)
+  - `automl_data_quality_score` (gauge)
 - **Optional:** OpenTelemetry integration via `tracing-opentelemetry`
 - **ISO refs:** 25010 (operability)
 

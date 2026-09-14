@@ -9,7 +9,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write, BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use super::serializer::ModelMetadata;
 
 /// Semantic version
@@ -30,19 +30,19 @@ impl ModelVersion {
     pub fn parse(s: &str) -> Result<Self> {
         let parts: Vec<&str> = s.split('.').collect();
         if parts.len() != 3 {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 format!("Invalid version format: {}", s)
             ));
         }
 
         let major = parts[0].parse().map_err(|_| {
-            KolosalError::ValidationError(format!("Invalid major version: {}", parts[0]))
+            AutoMLError::ValidationError(format!("Invalid major version: {}", parts[0]))
         })?;
         let minor = parts[1].parse().map_err(|_| {
-            KolosalError::ValidationError(format!("Invalid minor version: {}", parts[1]))
+            AutoMLError::ValidationError(format!("Invalid minor version: {}", parts[1]))
         })?;
         let patch = parts[2].parse().map_err(|_| {
-            KolosalError::ValidationError(format!("Invalid patch version: {}", parts[2]))
+            AutoMLError::ValidationError(format!("Invalid patch version: {}", parts[2]))
         })?;
 
         Ok(Self { major, minor, patch })
@@ -199,7 +199,7 @@ impl ModelRegistry {
         // Create directory if needed
         if !root.exists() {
             fs::create_dir_all(&root).map_err(|e| {
-                KolosalError::DataError(format!("Failed to create registry: {}", e))
+                AutoMLError::DataError(format!("Failed to create registry: {}", e))
             })?;
         }
 
@@ -207,10 +207,10 @@ impl ModelRegistry {
         let index_path = root.join("index.json");
         let index = if index_path.exists() {
             let file = File::open(&index_path).map_err(|e| {
-                KolosalError::DataError(format!("Failed to open index: {}", e))
+                AutoMLError::DataError(format!("Failed to open index: {}", e))
             })?;
             serde_json::from_reader(BufReader::new(file)).map_err(|e| {
-                KolosalError::SerializationError(format!("Failed to read index: {}", e))
+                AutoMLError::SerializationError(format!("Failed to read index: {}", e))
             })?
         } else {
             RegistryIndex::default()
@@ -223,11 +223,11 @@ impl ModelRegistry {
     fn save_index(&self) -> Result<()> {
         let index_path = self.root.join("index.json");
         let file = File::create(&index_path).map_err(|e| {
-            KolosalError::DataError(format!("Failed to create index: {}", e))
+            AutoMLError::DataError(format!("Failed to create index: {}", e))
         })?;
         
         serde_json::to_writer_pretty(BufWriter::new(file), &self.index).map_err(|e| {
-            KolosalError::SerializationError(format!("Failed to write index: {}", e))
+            AutoMLError::SerializationError(format!("Failed to write index: {}", e))
         })?;
 
         Ok(())
@@ -243,7 +243,7 @@ impl ModelRegistry {
         let model_dir = self.root.join(name);
         if !model_dir.exists() {
             fs::create_dir_all(&model_dir).map_err(|e| {
-                KolosalError::DataError(format!("Failed to create model dir: {}", e))
+                AutoMLError::DataError(format!("Failed to create model dir: {}", e))
             })?;
         }
 
@@ -254,14 +254,14 @@ impl ModelRegistry {
 
         // Serialize model
         let bytes = bincode::serialize(versioned).map_err(|e| {
-            KolosalError::SerializationError(format!("Failed to serialize: {}", e))
+            AutoMLError::SerializationError(format!("Failed to serialize: {}", e))
         })?;
 
         let mut file = File::create(&file_path).map_err(|e| {
-            KolosalError::DataError(format!("Failed to create model file: {}", e))
+            AutoMLError::DataError(format!("Failed to create model file: {}", e))
         })?;
         file.write_all(&bytes).map_err(|e| {
-            KolosalError::DataError(format!("Failed to write model: {}", e))
+            AutoMLError::DataError(format!("Failed to write model: {}", e))
         })?;
 
         // Create registry entry
@@ -300,12 +300,12 @@ impl ModelRegistry {
         name: &str,
     ) -> Result<VersionedModel<M>> {
         let entries = self.index.models.get(name).ok_or_else(|| {
-            KolosalError::DataError(format!("Model not found: {}", name))
+            AutoMLError::DataError(format!("Model not found: {}", name))
         })?;
 
         let latest = entries.iter().max_by(|a, b| a.version.cmp(&b.version))
             .ok_or_else(|| {
-                KolosalError::DataError(format!("No versions found: {}", name))
+                AutoMLError::DataError(format!("No versions found: {}", name))
             })?;
 
         self.load(&latest.path)
@@ -318,12 +318,12 @@ impl ModelRegistry {
         version: &ModelVersion,
     ) -> Result<VersionedModel<M>> {
         let entries = self.index.models.get(name).ok_or_else(|| {
-            KolosalError::DataError(format!("Model not found: {}", name))
+            AutoMLError::DataError(format!("Model not found: {}", name))
         })?;
 
         let entry = entries.iter().find(|e| &e.version == version)
             .ok_or_else(|| {
-                KolosalError::DataError(format!("Version not found: {}", version))
+                AutoMLError::DataError(format!("Version not found: {}", version))
             })?;
 
         self.load(&entry.path)
@@ -333,16 +333,16 @@ impl ModelRegistry {
     fn load<M: for<'de> Deserialize<'de>>(&self, rel_path: &str) -> Result<VersionedModel<M>> {
         let path = self.root.join(rel_path);
         let mut file = File::open(&path).map_err(|e| {
-            KolosalError::DataError(format!("Failed to open model: {}", e))
+            AutoMLError::DataError(format!("Failed to open model: {}", e))
         })?;
 
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(|e| {
-            KolosalError::DataError(format!("Failed to read model: {}", e))
+            AutoMLError::DataError(format!("Failed to read model: {}", e))
         })?;
 
         bincode::deserialize(&bytes).map_err(|e| {
-            KolosalError::SerializationError(format!("Failed to deserialize: {}", e))
+            AutoMLError::SerializationError(format!("Failed to deserialize: {}", e))
         })
     }
 
@@ -366,12 +366,12 @@ impl ModelRegistry {
     /// Delete a model version
     pub fn delete(&mut self, name: &str, version: &ModelVersion) -> Result<()> {
         let entries = self.index.models.get_mut(name).ok_or_else(|| {
-            KolosalError::DataError(format!("Model not found: {}", name))
+            AutoMLError::DataError(format!("Model not found: {}", name))
         })?;
 
         let idx = entries.iter().position(|e| &e.version == version)
             .ok_or_else(|| {
-                KolosalError::DataError(format!("Version not found: {}", version))
+                AutoMLError::DataError(format!("Version not found: {}", version))
             })?;
 
         let entry = entries.remove(idx);
@@ -380,7 +380,7 @@ impl ModelRegistry {
         let path = self.root.join(&entry.path);
         if path.exists() {
             fs::remove_file(&path).map_err(|e| {
-                KolosalError::DataError(format!("Failed to delete file: {}", e))
+                AutoMLError::DataError(format!("Failed to delete file: {}", e))
             })?;
         }
 

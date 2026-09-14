@@ -1,6 +1,6 @@
 //! Blending ensemble method
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::training::Model;
 use ndarray::{Array1, Array2};
 use rand::prelude::*;
@@ -74,13 +74,13 @@ where
     /// Fit the blending ensemble
     pub fn fit(&mut self, x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
         if self.base_model_factories.is_empty() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "No base models provided".to_string(),
             ));
         }
 
         if self.meta_learner_factory.is_none() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "No meta-learner provided".to_string(),
             ));
         }
@@ -90,7 +90,7 @@ where
         let n_train = n_samples - n_holdout;
 
         if n_holdout < 1 || n_train < 1 {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Not enough samples for blending".to_string(),
             ));
         }
@@ -158,11 +158,11 @@ where
     /// Make predictions
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         let fitted_models = self.fitted_base_models.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Model not fitted".to_string())
+            AutoMLError::ValidationError("Model not fitted".to_string())
         })?;
 
         let meta_learner = self.fitted_meta_learner.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Model not fitted".to_string())
+            AutoMLError::ValidationError("Model not fitted".to_string())
         })?;
 
         let n_samples = x.nrows();
@@ -254,13 +254,13 @@ where
     /// Fit the blending ensemble
     pub fn fit(&mut self, x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
         if self.base_model_factories.is_empty() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "No base models provided".to_string(),
             ));
         }
 
         if self.meta_learner_factory.is_none() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "No meta-learner provided".to_string(),
             ));
         }
@@ -270,7 +270,7 @@ where
         let n_train = n_samples - n_holdout;
 
         if n_holdout < 1 || n_train < 1 {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Not enough samples for blending".to_string(),
             ));
         }
@@ -332,11 +332,11 @@ where
     /// Make predictions
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         let fitted_models = self.fitted_base_models.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Model not fitted".to_string())
+            AutoMLError::ValidationError("Model not fitted".to_string())
         })?;
 
         let meta_learner = self.fitted_meta_learner.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Model not fitted".to_string())
+            AutoMLError::ValidationError("Model not fitted".to_string())
         })?;
 
         let n_samples = x.nrows();

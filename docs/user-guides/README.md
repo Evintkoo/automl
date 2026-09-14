@@ -1,6 +1,6 @@
-# 🎓 Kolosal AutoML User Guides
+# 🎓 AutoML User Guides
 
-Welcome to the comprehensive user guides for Kolosal AutoML! These guides are designed to help you get the most out of our automated machine learning platform, whether you're a data scientist, ML engineer, or business analyst.
+Welcome to the comprehensive user guides for AutoML! These guides are designed to help you get the most out of our automated machine learning platform, whether you're a data scientist, ML engineer, or business analyst.
 
 ## 📖 Guide Categories
 
@@ -37,7 +37,7 @@ Welcome to the comprehensive user guides for Kolosal AutoML! These guides are de
 
 ## 🚀 Quick Start Path
 
-If you're new to Kolosal AutoML, follow this recommended learning path:
+If you're new to AutoML, follow this recommended learning path:
 
 ```mermaid
 graph TD

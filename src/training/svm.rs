@@ -2,7 +2,7 @@
 //!
 //! Provides SVM classifier and regressor using SMO (Sequential Minimal Optimization) algorithm.
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::{Array1, Array2};
 use rayon::prelude::*;
 use rand::prelude::*;
@@ -113,7 +113,7 @@ impl SVMClassifier {
         // Validate that all labels are integral values (no silent truncation)
         for (i, &v) in y.iter().enumerate() {
             if (v - v.round()).abs() > 1e-9 {
-                return Err(KolosalError::InvalidInput(
+                return Err(AutoMLError::InvalidInput(
                     format!("SVM classifier requires integer class labels, but sample {} has label {}", i, v)
                 ));
             }
@@ -124,7 +124,7 @@ impl SVMClassifier {
         classes.dedup();
 
         if classes.len() < 2 {
-            return Err(KolosalError::InvalidInput(
+            return Err(AutoMLError::InvalidInput(
                 "SVM requires at least 2 distinct classes".to_string()
             ));
         }
@@ -560,7 +560,7 @@ impl SVMClassifier {
     /// Predict class labels (binary and multi-class)
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         let n = x.nrows();
@@ -608,7 +608,7 @@ impl SVMClassifier {
     /// Get decision function values (binary: single score, multi-class: max OvR score)
     pub fn decision_function(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         let n = x.nrows();
@@ -872,7 +872,7 @@ impl SVMRegressor {
     /// Predict target values
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
         
         let sv = self.support_vectors.as_ref().unwrap();

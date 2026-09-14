@@ -1,5 +1,5 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use kolosal_automl::preprocessing::{DataPreprocessor, PreprocessingConfig, ScalerType};
+use automl::preprocessing::{DataPreprocessor, PreprocessingConfig, ScalerType};
 use polars::prelude::*;
 use rand::prelude::*;
 

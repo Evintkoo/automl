@@ -1,6 +1,6 @@
 //! Platt scaling (sigmoid calibration)
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::calibration::Calibrator;
 use ndarray::Array1;
 use serde::{Deserialize, Serialize};
@@ -84,13 +84,13 @@ impl Calibrator for PlattScaling {
     fn fit(&mut self, probs: &Array1<f64>, labels: &Array1<f64>) -> Result<()> {
         let n = probs.len();
         if n != labels.len() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Probabilities and labels must have same length".to_string(),
             ));
         }
 
         if n == 0 {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Empty input".to_string(),
             ));
         }
@@ -176,7 +176,7 @@ impl Calibrator for PlattScaling {
 
     fn calibrate(&self, probs: &Array1<f64>) -> Result<Array1<f64>> {
         let (a, b) = self.parameters().ok_or_else(|| {
-            KolosalError::ValidationError("Calibrator not fitted".to_string())
+            AutoMLError::ValidationError("Calibrator not fitted".to_string())
         })?;
 
         let calibrated: Vec<f64> = probs

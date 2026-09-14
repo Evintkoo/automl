@@ -2,7 +2,7 @@
 
 ## Overview
 
-The configuration system provides type-safe configuration classes for all system components in kolosal AutoML. Built using Python dataclasses and enums, it ensures consistent and validated configuration across all modules.
+The configuration system provides type-safe configuration classes for all system components in AutoML. Built using Python dataclasses and enums, it ensures consistent and validated configuration across all modules.
 
 ## Features
 

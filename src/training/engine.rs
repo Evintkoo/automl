@@ -1,6 +1,6 @@
 //! Training engine implementation
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use super::{TrainingConfig, ModelType, TaskType, ModelMetrics};
 use super::linear_models::{LinearRegression, LogisticRegression, RidgeRegression, LassoRegression, ElasticNetRegression, PolynomialRegression};
 use super::decision_tree::DecisionTree;
@@ -188,7 +188,7 @@ impl TrainEngine {
     /// Make predictions on new data
     pub fn predict(&self, df: &DataFrame) -> Result<Array1<f64>> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         let x = self.extract_features(df)?;
@@ -246,14 +246,14 @@ impl TrainEngine {
         // Extract target (cast to Float64 if needed)
         let target_series = df
             .column(&self.config.target_column)
-            .map_err(|_| KolosalError::FeatureNotFound(self.config.target_column.clone()))?;
+            .map_err(|_| AutoMLError::FeatureNotFound(self.config.target_column.clone()))?;
 
         let target_f64 = target_series.cast(&DataType::Float64)
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         let y: Array1<f64> = target_f64
             .f64()
-            .map_err(|e| KolosalError::DataError(e.to_string()))?
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?
             .into_iter()
             .map(|v| v.unwrap_or(0.0))
             .collect();
@@ -280,12 +280,12 @@ impl TrainEngine {
             .map(|col_name| {
                 let series = df
                     .column(col_name)
-                    .map_err(|_| KolosalError::FeatureNotFound(col_name.clone()))?;
+                    .map_err(|_| AutoMLError::FeatureNotFound(col_name.clone()))?;
                 let series_f64 = series.cast(&DataType::Float64)
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?;
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?;
                 let values: Vec<f64> = series_f64
                     .f64()
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?
                     .into_iter()
                     .map(|v| v.unwrap_or(0.0))
                     .collect();
@@ -302,7 +302,7 @@ impl TrainEngine {
             }
         }
         Array2::from_shape_vec((n_rows, n_cols), data)
-            .map_err(|e| KolosalError::DataError(e.to_string()))
+            .map_err(|e| AutoMLError::DataError(e.to_string()))
     }
 
     fn train_val_split(
@@ -325,9 +325,9 @@ impl TrainEngine {
             let val_data = x_raw[train_size * n_cols..].to_vec();
             (
                 Array2::from_shape_vec((train_size, n_cols), train_data)
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?,
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?,
                 Array2::from_shape_vec((val_size, n_cols), val_data)
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?,
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?,
             )
         } else {
             (
@@ -646,7 +646,7 @@ impl TrainEngine {
                 // cap user-supplied rates above 0.01 for regression to maintain stability.
                 let raw_lr = self.config.learning_rate.unwrap_or(0.01);
                 let eta0 = if raw_lr > 0.01 {
-                    eprintln!("[kolosal] SGD regression: clamping learning_rate {raw_lr} → 0.01 to prevent divergence");
+                    eprintln!("[automl] SGD regression: clamping learning_rate {raw_lr} → 0.01 to prevent divergence");
                     0.01
                 } else {
                     raw_lr
@@ -760,7 +760,7 @@ impl TrainEngine {
     }
 
     fn predict_internal(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
-        let model = self.model.as_ref().ok_or(KolosalError::ModelNotFitted)?;
+        let model = self.model.as_ref().ok_or(AutoMLError::ModelNotFitted)?;
 
         let predictions = match model {
             TrainedModel::LinearRegression(m) => m.predict(x)?,
@@ -802,7 +802,7 @@ impl TrainEngine {
     }
 
     fn predict_proba_internal(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
-        let model = self.model.as_ref().ok_or(KolosalError::ModelNotFitted)?;
+        let model = self.model.as_ref().ok_or(AutoMLError::ModelNotFitted)?;
 
         let proba = match model {
             TrainedModel::LogisticRegression(m) => {
@@ -895,7 +895,7 @@ impl TrainEngine {
             | TrainedModel::KMeans(_)
             | TrainedModel::DBSCAN(_)
             | TrainedModel::SelfOrganizingMap(_) => {
-                return Err(KolosalError::TrainingError(
+                return Err(AutoMLError::TrainingError(
                     "predict_proba is only supported for classification models".to_string(),
                 ));
             }
@@ -907,7 +907,7 @@ impl TrainEngine {
     /// Predict class probabilities from a DataFrame
     pub fn predict_proba(&self, df: &DataFrame) -> Result<Array2<f64>> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         let x = self.extract_features(df)?;
@@ -1033,7 +1033,7 @@ impl TrainEngine {
         }
 
         if train_indices.is_empty() || val_indices.is_empty() {
-            return Err(KolosalError::DataError(
+            return Err(AutoMLError::DataError(
                 "Stratified split resulted in empty train or validation set".to_string(),
             ));
         }
@@ -1299,7 +1299,7 @@ impl TrainEngine {
     /// Generate a text report summarizing the trained model
     pub fn generate_report(&self) -> String {
         let mut report = String::new();
-        report.push_str("=== Kolosal AutoML Training Report ===\n\n");
+        report.push_str("=== AutoML Training Report ===\n\n");
 
         // Model info
         report.push_str(&format!("Model Type: {:?}\n", self.config.model_type));

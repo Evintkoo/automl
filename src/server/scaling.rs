@@ -114,24 +114,24 @@ pub fn prometheus_metrics(
     let draining = if scaling.is_draining() { 1 } else { 0 };
 
     format!(
-        "# HELP kolosal_requests_total Total inference requests served.\n\
-         # TYPE kolosal_requests_total counter\n\
-         kolosal_requests_total {total}\n\
-         # HELP kolosal_inflight_requests Currently inflight requests.\n\
-         # TYPE kolosal_inflight_requests gauge\n\
-         kolosal_inflight_requests {inflight}\n\
-         # HELP kolosal_queue_depth Requests waiting in the batch queue.\n\
-         # TYPE kolosal_queue_depth gauge\n\
-         kolosal_queue_depth {queue_depth}\n\
-         # HELP kolosal_idle_duration_seconds Seconds since last request.\n\
-         # TYPE kolosal_idle_duration_seconds gauge\n\
-         kolosal_idle_duration_seconds {idle:.3}\n\
-         # HELP kolosal_draining Whether the server is draining.\n\
-         # TYPE kolosal_draining gauge\n\
-         kolosal_draining {draining}\n\
-         # HELP kolosal_uptime_seconds Server uptime in seconds.\n\
-         # TYPE kolosal_uptime_seconds gauge\n\
-         kolosal_uptime_seconds {uptime:.3}\n",
+        "# HELP automl_requests_total Total inference requests served.\n\
+         # TYPE automl_requests_total counter\n\
+         automl_requests_total {total}\n\
+         # HELP automl_inflight_requests Currently inflight requests.\n\
+         # TYPE automl_inflight_requests gauge\n\
+         automl_inflight_requests {inflight}\n\
+         # HELP automl_queue_depth Requests waiting in the batch queue.\n\
+         # TYPE automl_queue_depth gauge\n\
+         automl_queue_depth {queue_depth}\n\
+         # HELP automl_idle_duration_seconds Seconds since last request.\n\
+         # TYPE automl_idle_duration_seconds gauge\n\
+         automl_idle_duration_seconds {idle:.3}\n\
+         # HELP automl_draining Whether the server is draining.\n\
+         # TYPE automl_draining gauge\n\
+         automl_draining {draining}\n\
+         # HELP automl_uptime_seconds Server uptime in seconds.\n\
+         # TYPE automl_uptime_seconds gauge\n\
+         automl_uptime_seconds {uptime:.3}\n",
         total = total,
         inflight = inflight,
         queue_depth = queue_depth,
@@ -164,8 +164,8 @@ mod tests {
         let state = ScalingState::new();
         state.record_request();
         let output = prometheus_metrics(&state, 5, 10, 1);
-        assert!(output.contains("kolosal_requests_total 1"));
-        assert!(output.contains("kolosal_inflight_requests 5"));
-        assert!(output.contains("kolosal_queue_depth 10"));
+        assert!(output.contains("automl_requests_total 1"));
+        assert!(output.contains("automl_inflight_requests 5"));
+        assert!(output.contains("automl_queue_depth 10"));
     }
 }

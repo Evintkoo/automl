@@ -4,7 +4,7 @@
 //! of features, Extra Trees picks both the feature AND the threshold at random.
 //! This further reduces variance at a small cost to bias, and is faster to train.
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::{Array1, Array2};
 use rand::SeedableRng;
 use rand::RngCore;
@@ -296,7 +296,7 @@ impl ExtraTrees {
         let n_samples = x.nrows();
         let n_features = x.ncols();
         if n_samples != y.len() {
-            return Err(KolosalError::ShapeError {
+            return Err(AutoMLError::ShapeError {
                 expected: format!("y length = {}", n_samples),
                 actual: format!("y length = {}", y.len()),
             });
@@ -338,7 +338,7 @@ impl ExtraTrees {
 
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         let n_samples = x.nrows();
@@ -374,7 +374,7 @@ impl ExtraTrees {
 
     pub fn predict_proba(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         if !self.is_fitted || !self.is_classification {
-            return Err(KolosalError::TrainingError(
+            return Err(AutoMLError::TrainingError(
                 "predict_proba requires a fitted classification model".to_string()
             ));
         }

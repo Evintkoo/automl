@@ -1,6 +1,6 @@
 //! Local Outlier Factor (LOF) anomaly detection
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::anomaly::AnomalyDetector;
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
@@ -179,7 +179,7 @@ impl LocalOutlierFactor {
     /// Get detailed LOF results
     pub fn compute_lof_details(&self, x: &Array2<f64>) -> Result<LOFResult> {
         let x_train = self.x_train.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Model not fitted".to_string())
+            AutoMLError::ValidationError("Model not fitted".to_string())
         })?;
 
         let train_k_distances = self.k_distances.as_ref().unwrap();

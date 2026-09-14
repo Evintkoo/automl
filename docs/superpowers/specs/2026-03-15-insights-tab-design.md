@@ -7,7 +7,7 @@
 
 ## Overview
 
-Add a top-level **Insights** tab to the Kolosal AutoML frontend, sitting alongside Train / Predict / Analysis. It contains four sub-tabs, each a Canvas 2D visualization connected to the user's live session (trained model + uploaded dataset). The goal is to let users understand *how their model thinks* — not just what it outputs.
+Add a top-level **Insights** tab to the AutoML frontend, sitting alongside Train / Predict / Analysis. It contains four sub-tabs, each a Canvas 2D visualization connected to the user's live session (trained model + uploaded dataset). The goal is to let users understand *how their model thinks* — not just what it outputs.
 
 No external charting libraries. All rendering uses the native HTML5 Canvas 2D API, consistent with the rest of the frontend.
 

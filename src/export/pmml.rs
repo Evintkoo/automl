@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::{Write, BufWriter};
 use std::path::Path;
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 
 /// PMML data type
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -208,7 +208,7 @@ impl Default for PMMLHeader {
         Self {
             copyright: None,
             description: None,
-            application_name: "Kolosal AutoML".to_string(),
+            application_name: "AutoML".to_string(),
             application_version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
@@ -226,7 +226,7 @@ impl PMMLExporter {
     /// Export PMML document to file
     pub fn export(&self, doc: &PMMLDocument, path: impl AsRef<Path>) -> Result<()> {
         let file = File::create(path.as_ref()).map_err(|e| {
-            KolosalError::DataError(format!("Failed to create file: {}", e))
+            AutoMLError::DataError(format!("Failed to create file: {}", e))
         })?;
         let mut writer = BufWriter::new(file);
 
@@ -238,7 +238,7 @@ impl PMMLExporter {
         let mut buffer = Vec::new();
         self.write_pmml(&mut buffer, doc)?;
         String::from_utf8(buffer).map_err(|e| {
-            KolosalError::SerializationError(format!("Invalid UTF-8: {}", e))
+            AutoMLError::SerializationError(format!("Invalid UTF-8: {}", e))
         })
     }
 
@@ -492,8 +492,8 @@ impl PMMLExporter {
             .replace('\'', "&apos;")
     }
 
-    fn io_err(e: std::io::Error) -> KolosalError {
-        KolosalError::DataError(format!("Failed to write PMML: {}", e))
+    fn io_err(e: std::io::Error) -> AutoMLError {
+        AutoMLError::DataError(format!("Failed to write PMML: {}", e))
     }
 }
 

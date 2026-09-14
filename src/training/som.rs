@@ -6,7 +6,7 @@ use ndarray::{Array1, Array2};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 
 /// Self-Organizing Map with rectangular grid topology
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,7 +59,7 @@ impl SOM {
         let n_neurons = self.grid_rows * self.grid_cols;
 
         if n_samples == 0 {
-            return Err(KolosalError::TrainingError("Empty dataset".to_string()));
+            return Err(AutoMLError::TrainingError("Empty dataset".to_string()));
         }
 
         // Compute per-feature min/max for weight initialization
@@ -152,7 +152,7 @@ impl SOM {
     /// Predict BMU index (flattened row * grid_cols + col) for each sample
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         let weights = self.weights.as_ref()
-            .ok_or_else(|| KolosalError::ModelNotFitted)?;
+            .ok_or_else(|| AutoMLError::ModelNotFitted)?;
 
         let n_neurons = self.grid_rows * self.grid_cols;
         let predictions: Vec<f64> = (0..x.nrows())

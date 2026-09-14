@@ -31,7 +31,7 @@ export interface Platform {
 
 export const RUST_PLATFORM: Platform = {
   name: 'rust',
-  baseURL: 'https://kolosalautoml-production.up.railway.app',
+  baseURL: 'https://automlautoml-production.up.railway.app',
   healthEndpoint: '/api/health',
   selectors: {
     sampleDatasetIris: 'button.pill:has-text("Iris")',
@@ -62,7 +62,7 @@ export const RUST_PLATFORM: Platform = {
 
 export const PYTHON_PLATFORM: Platform = {
   name: 'python',
-  baseURL: 'https://kolosal-automl-before-planout-production.up.railway.app',
+  baseURL: 'https://automl-before-planout-production.up.railway.app',
   healthEndpoint: '/',
   selectors: {
     sampleDatasetIris: 'label:has-text("Sample Dataset") + div input, [data-testid="dropdown"]',
@@ -381,7 +381,7 @@ export function printComparisonTable() {
   const thin = '-'.repeat(W);
 
   console.log('\n' + sep);
-  console.log('  KOLOSAL AUTOML PERFORMANCE COMPARISON: RUST vs PYTHON — DETAILED STATISTICAL REPORT');
+  console.log('  AUTOML PERFORMANCE COMPARISON: RUST vs PYTHON — DETAILED STATISTICAL REPORT');
   console.log(sep);
 
   // ---- Executive summary ----

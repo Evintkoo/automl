@@ -8,7 +8,7 @@
 //! - ISO/IEC 5259-1 Clause 6: Data quality management
 //! - ISO/IEC 5338 Clause 6.3.3: Data management processes
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -280,7 +280,7 @@ impl ProvenanceTracker {
     ) -> Result<()> {
         let mut records = self.records.write();
         let lineage = records.get_mut(dataset_id).ok_or_else(|| {
-            KolosalError::ProvenanceError(format!("Dataset not found: {}", dataset_id))
+            AutoMLError::ProvenanceError(format!("Dataset not found: {}", dataset_id))
         })?;
         lineage.record_transformation(record);
         Ok(())
@@ -294,7 +294,7 @@ impl ProvenanceTracker {
     ) -> Result<()> {
         let mut records = self.records.write();
         let lineage = records.get_mut(dataset_id).ok_or_else(|| {
-            KolosalError::ProvenanceError(format!("Dataset not found: {}", dataset_id))
+            AutoMLError::ProvenanceError(format!("Dataset not found: {}", dataset_id))
         })?;
         lineage.update_schema(schema);
         Ok(())

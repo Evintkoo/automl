@@ -245,7 +245,7 @@ pub async fn download_dataset(url: &str, source: &SourceType) -> Result<(Vec<u8>
     let client = safe_http_client(300)?;
 
     let response = client.get(&download_url)
-        .header("User-Agent", "Kolosal-AutoML/0.5")
+        .header("User-Agent", "AutoML/0.5")
         .send()
         .await
         .map_err(|e| format!("Download failed: {}", e))?;
@@ -355,7 +355,7 @@ async fn download_kaggle(slug: &str) -> Result<(Vec<u8>, FileFormat, String), St
 
     let response = client.get(&api_url)
         .basic_auth(&username, Some(&key))
-        .header("User-Agent", "Kolosal-AutoML/0.5")
+        .header("User-Agent", "AutoML/0.5")
         .send()
         .await
         .map_err(|e| format!("Kaggle API request failed: {}", e))?;
@@ -389,7 +389,7 @@ async fn download_huggingface(dataset_id: &str) -> Result<(Vec<u8>, FileFormat, 
     // Try parquet
     info!(dataset_id = %dataset_id, "Trying HuggingFace parquet download");
     let resp = client.get(&parquet_url)
-        .header("User-Agent", "Kolosal-AutoML/0.5")
+        .header("User-Agent", "AutoML/0.5")
         .send().await;
     if let Ok(r) = resp {
         if r.status().is_success() {
@@ -402,7 +402,7 @@ async fn download_huggingface(dataset_id: &str) -> Result<(Vec<u8>, FileFormat, 
     // Try CSV
     warn!(dataset_id = %dataset_id, "Parquet not found, trying CSV");
     let resp = client.get(&csv_url)
-        .header("User-Agent", "Kolosal-AutoML/0.5")
+        .header("User-Agent", "AutoML/0.5")
         .send().await
         .map_err(|e| format!("HF download failed: {}", e))?;
 

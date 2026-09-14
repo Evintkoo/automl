@@ -3,7 +3,7 @@
 //! Demonstrates comparing multiple models on the same dataset.
 
 use polars::prelude::*;
-use kolosal_automl::training::{TrainEngine, TrainingConfig, TaskType, ModelType};
+use automl::training::{TrainEngine, TrainingConfig, TaskType, ModelType};
 use std::time::Instant;
 
 fn main() -> anyhow::Result<()> {

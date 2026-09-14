@@ -1,8 +1,8 @@
-# Kolosal AutoML - Rust Migration Plan
+# AutoML - Rust Migration Plan
 
 ## Overview
 
-**Project**: KolosalAI/kolosal_automl  
+**Project**: Evintkoo/automl  
 **Target Branch**: `rust-dev` (new branch from `main`)  
 **Current Stack**: Python 3.9+ with FastAPI, Gradio, scikit-learn, XGBoost, LightGBM, Optuna  
 **Target Stack**: Rust with Python bindings via PyO3  
@@ -101,7 +101,7 @@ The codebase is a production-ready AutoML framework (~1.5M+ lines including depe
 ┌──────────────────────────▼──────────────────────────────────────┐
 │                        Rust Layer                                │
 │  ┌─────────────────────────────────────────────────────────────┐│
-│  │                    kolosal-core                              ││
+│  │                    automl-core                              ││
 │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────────┐  ││
 │  │  │  Data    │ │ Training │ │Inference │ │   Optimizer    │  ││
 │  │  │Processing│ │  Engine  │ │  Engine  │ │  (HyperOptX)   │  ││
@@ -119,10 +119,10 @@ The codebase is a production-ready AutoML framework (~1.5M+ lines including depe
 ```python
 # In Python code
 import os
-USE_RUST_BACKEND = os.environ.get("KOLOSAL_USE_RUST", "1") == "1"
+USE_RUST_BACKEND = os.environ.get("AUTOML_USE_RUST", "1") == "1"
 
 if USE_RUST_BACKEND:
-    from kolosal_rust import DataPreprocessor, TrainEngine
+    from automl_rust import DataPreprocessor, TrainEngine
 else:
     from modules.engine.data_preprocessor import DataPreprocessor
     from modules.engine.train_engine import TrainEngine
@@ -183,8 +183,8 @@ else:
 - [ ] **2.1 Core Types**
   ```rust
   // Key types to implement
-  pub struct KolosalArray<T> { /* ndarray wrapper */ }
-  pub struct KolosalDataFrame { /* polars wrapper */ }
+  pub struct AutoMLArray<T> { /* ndarray wrapper */ }
+  pub struct AutoMLDataFrame { /* polars wrapper */ }
   pub struct FeatureColumn { /* column metadata + data */ }
   pub enum DType { Float32, Float64, Int32, Int64, String, Categorical, DateTime }
   ```
@@ -242,7 +242,7 @@ else:
 - [ ] **3.1 Data Loading** (`optimized_data_loader.rs`)
   ```rust
   pub trait DataLoader: Send + Sync {
-      fn load(&self, path: &Path) -> Result<KolosalDataFrame>;
+      fn load(&self, path: &Path) -> Result<AutoMLDataFrame>;
       fn load_chunked(&self, path: &Path, chunk_size: usize) -> ChunkedReader;
   }
   
@@ -267,10 +267,10 @@ else:
   }
   
   impl DataPreprocessor {
-      pub fn fit(&mut self, df: &KolosalDataFrame) -> Result<()>;
-      pub fn transform(&self, df: &KolosalDataFrame) -> Result<KolosalDataFrame>;
-      pub fn fit_transform(&mut self, df: &KolosalDataFrame) -> Result<KolosalDataFrame>;
-      pub fn inverse_transform(&self, df: &KolosalDataFrame) -> Result<KolosalDataFrame>;
+      pub fn fit(&mut self, df: &AutoMLDataFrame) -> Result<()>;
+      pub fn transform(&self, df: &AutoMLDataFrame) -> Result<AutoMLDataFrame>;
+      pub fn fit_transform(&mut self, df: &AutoMLDataFrame) -> Result<AutoMLDataFrame>;
+      pub fn inverse_transform(&self, df: &AutoMLDataFrame) -> Result<AutoMLDataFrame>;
   }
   ```
   
@@ -611,7 +611,7 @@ else:
 - [ ] **8.1 Module Structure**
   ```rust
   #[pymodule]
-  fn kolosal_rust(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+  fn automl_rust(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
       m.add_class::<PyDataPreprocessor>()?;
       m.add_class::<PyTrainEngine>()?;
       m.add_class::<PyInferenceEngine>()?;
@@ -622,11 +622,11 @@ else:
 
 - [ ] **8.2 Data Conversion**
   ```rust
-  impl<'py> FromPyObject<'py> for KolosalArray<f64> {
+  impl<'py> FromPyObject<'py> for AutoMLArray<f64> {
       fn extract(ob: &'py PyAny) -> PyResult<Self> {
           let array: PyReadonlyArray2<f64> = ob.extract()?;
           // Zero-copy when possible
-          Ok(KolosalArray::from_numpy(array))
+          Ok(AutoMLArray::from_numpy(array))
       }
   }
   ```
@@ -639,7 +639,7 @@ else:
 - [ ] **8.3 Error Handling**
   ```rust
   #[derive(Debug, thiserror::Error)]
-  pub enum KolosalError {
+  pub enum AutoMLError {
       #[error("Data processing error: {0}")]
       DataError(String),
       #[error("Training error: {0}")]
@@ -647,8 +647,8 @@ else:
       // ...
   }
   
-  impl From<KolosalError> for PyErr {
-      fn from(err: KolosalError) -> PyErr {
+  impl From<AutoMLError> for PyErr {
+      fn from(err: AutoMLError) -> PyErr {
           PyRuntimeError::new_err(err.to_string())
       }
   }
@@ -709,14 +709,14 @@ else:
 ### Project Structure
 
 ```
-kolosal_automl/
+automl/
 ├── Cargo.toml                          # Workspace root
 ├── rust-toolchain.toml                 # Pin Rust version
 ├── .cargo/
 │   └── config.toml                     # Build optimizations
 │
 ├── rust/
-│   ├── kolosal-core/                   # Core library (no Python deps)
+│   ├── automl-core/                   # Core library (no Python deps)
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs                  # Public API
@@ -804,7 +804,7 @@ kolosal_automl/
 │   │           ├── stats.rs            # Statistical functions
 │   │           └── math.rs             # Math utilities
 │   │
-│   ├── kolosal-python/                 # PyO3 bindings
+│   ├── automl-python/                 # PyO3 bindings
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── lib.rs                  # Module definition
@@ -816,7 +816,7 @@ kolosal_automl/
 │   │       ├── optimizer.rs            # Optimizer bindings
 │   │       └── async_support.rs        # Async Python support
 │   │
-│   ├── kolosal-server/                 # Optional native server
+│   ├── automl-server/                 # Optional native server
 │   │   ├── Cargo.toml
 │   │   └── src/
 │   │       ├── main.rs
@@ -827,13 +827,13 @@ kolosal_automl/
 │   │       │   └── health.rs
 │   │       └── state.rs
 │   │
-│   └── kolosal-cli/                    # Optional CLI
+│   └── automl-cli/                    # Optional CLI
 │       ├── Cargo.toml
 │       └── src/
 │           └── main.rs
 │
 ├── python/
-│   └── kolosal_rust/                   # Python package
+│   └── automl_rust/                   # Python package
 │       ├── __init__.py
 │       ├── __init__.pyi                # Type stubs
 │       ├── preprocessing.pyi
@@ -866,10 +866,10 @@ kolosal_automl/
 [workspace]
 resolver = "2"
 members = [
-    "rust/kolosal-core",
-    "rust/kolosal-python",
-    "rust/kolosal-server",
-    "rust/kolosal-cli",
+    "rust/automl-core",
+    "rust/automl-python",
+    "rust/automl-server",
+    "rust/automl-cli",
 ]
 
 [workspace.package]
@@ -877,7 +877,7 @@ version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT"
-repository = "https://github.com/KolosalAI/kolosal_automl"
+repository = "https://github.com/Evintkoo/automl"
 
 [workspace.dependencies]
 # Core
@@ -1456,7 +1456,7 @@ Located in `tests/rust/unit/` and inline with source code.
 ```rust
 // Example: tests/rust/unit/preprocessing/test_scaler.rs
 
-use kolosal_core::preprocessing::{Scaler, ScalingStrategy};
+use automl_core::preprocessing::{Scaler, ScalingStrategy};
 use ndarray::array;
 use approx::assert_abs_diff_eq;
 
@@ -1522,7 +1522,7 @@ mod standard_scaler {
         let result = scaler.transform(&data);
         
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), KolosalError::NotFitted(_)));
+        assert!(matches!(result.unwrap_err(), AutoMLError::NotFitted(_)));
     }
 }
 
@@ -1602,7 +1602,7 @@ Located in `tests/rust/property/`
 
 use proptest::prelude::*;
 use ndarray::Array2;
-use kolosal_core::preprocessing::{DataPreprocessor, PreprocessorConfig};
+use automl_core::preprocessing::{DataPreprocessor, PreprocessorConfig};
 
 /// Generate random 2D arrays for testing
 fn array_strategy(rows: usize, cols: usize) -> impl Strategy<Value = Array2<f64>> {
@@ -1733,7 +1733,7 @@ Located in `tests/rust/integration/`
 ```rust
 // tests/rust/integration/test_training_pipeline.rs
 
-use kolosal_core::{
+use automl_core::{
     preprocessing::DataPreprocessor,
     training::{TrainEngine, TrainConfig, CVConfig},
     models::ModelRegistry,
@@ -1826,7 +1826,7 @@ mod training_pipeline {
 
 mod hyperparameter_optimization {
     use super::*;
-    use kolosal_core::optimizer::{HyperOptX, SearchSpace, Parameter};
+    use automl_core::optimizer::{HyperOptX, SearchSpace, Parameter};
 
     #[tokio::test]
     async fn test_hyperoptx_finds_optimum() {
@@ -1870,7 +1870,7 @@ mod hyperparameter_optimization {
                 let value = (x - 50.0).powi(2) + step as f64;
                 // Check for pruning
                 if optimizer.should_prune(step, value) {
-                    return Err(KolosalError::TrialPruned);
+                    return Err(AutoMLError::TrialPruned);
                 }
             }
             Ok((x - 50.0).powi(2))
@@ -1891,7 +1891,7 @@ Located in `benches/` using Criterion.
 // benches/preprocessing.rs
 
 use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
-use kolosal_core::preprocessing::{DataPreprocessor, PreprocessorConfig, ScalingStrategy};
+use automl_core::preprocessing::{DataPreprocessor, PreprocessorConfig, ScalingStrategy};
 use ndarray::Array2;
 use rand::prelude::*;
 
@@ -2036,7 +2036,7 @@ import pandas as pd
 from numpy.testing import assert_array_almost_equal, assert_array_equal
 
 # Import both implementations for comparison
-import kolosal_rust
+import automl_rust
 from modules.engine.data_preprocessor import DataPreprocessor as PythonPreprocessor
 
 
@@ -2064,7 +2064,7 @@ class TestDataPreprocessorParity:
         py_result = py_preprocessor.fit_transform(sample_data)
         
         # Rust
-        rust_preprocessor = kolosal_rust.DataPreprocessor(scaling='standard')
+        rust_preprocessor = automl_rust.DataPreprocessor(scaling='standard')
         rust_result = rust_preprocessor.fit_transform(sample_data)
         
         assert_array_almost_equal(rust_result, py_result, decimal=10)
@@ -2074,7 +2074,7 @@ class TestDataPreprocessorParity:
         py_preprocessor = PythonPreprocessor(scaling='minmax')
         py_result = py_preprocessor.fit_transform(sample_data)
         
-        rust_preprocessor = kolosal_rust.DataPreprocessor(scaling='minmax')
+        rust_preprocessor = automl_rust.DataPreprocessor(scaling='minmax')
         rust_result = rust_preprocessor.fit_transform(sample_data)
         
         assert_array_almost_equal(rust_result, py_result, decimal=10)
@@ -2086,14 +2086,14 @@ class TestDataPreprocessorParity:
         py_preprocessor = PythonPreprocessor(categorical_encoding='label')
         py_result = py_preprocessor.fit_transform_categorical(categories)
         
-        rust_preprocessor = kolosal_rust.DataPreprocessor(categorical_encoding='label')
+        rust_preprocessor = automl_rust.DataPreprocessor(categorical_encoding='label')
         rust_result = rust_preprocessor.fit_transform_categorical(categories)
         
         assert_array_equal(rust_result, py_result)
     
     def test_inverse_transform_roundtrip(self, sample_data):
         """Inverse transform should recover original data."""
-        rust_preprocessor = kolosal_rust.DataPreprocessor(scaling='standard')
+        rust_preprocessor = automl_rust.DataPreprocessor(scaling='standard')
         transformed = rust_preprocessor.fit_transform(sample_data)
         recovered = rust_preprocessor.inverse_transform(transformed)
         
@@ -2103,7 +2103,7 @@ class TestDataPreprocessorParity:
         """Should handle NaN values correctly."""
         data = np.array([[1.0, np.nan], [3.0, 4.0], [np.nan, 6.0]])
         
-        rust_preprocessor = kolosal_rust.DataPreprocessor(
+        rust_preprocessor = automl_rust.DataPreprocessor(
             scaling='standard',
             missing_strategy='mean'
         )
@@ -2132,7 +2132,7 @@ class TestTrainingEngineParity:
         py_result = py_engine.cross_validate(X, y)
         
         # Rust
-        rust_engine = kolosal_rust.TrainEngine(cv_folds=5, metric='accuracy')
+        rust_engine = automl_rust.TrainEngine(cv_folds=5, metric='accuracy')
         rust_result = rust_engine.cross_validate(X, y)
         
         # Scores should be within 1% (allowing for numerical differences)
@@ -2143,7 +2143,7 @@ class TestTrainingEngineParity:
         """Async training should work correctly."""
         X, y = classification_data
         
-        rust_engine = kolosal_rust.TrainEngine()
+        rust_engine = automl_rust.TrainEngine()
         result = await rust_engine.train_async(X, y)
         
         assert result.best_model is not None
@@ -2160,7 +2160,7 @@ class TestPerformanceImprovement:
     
     def test_preprocessing_speedup(self, large_data, benchmark):
         """Rust preprocessing should be faster than Python."""
-        rust_preprocessor = kolosal_rust.DataPreprocessor(scaling='standard')
+        rust_preprocessor = automl_rust.DataPreprocessor(scaling='standard')
         
         # Benchmark Rust
         rust_time = benchmark(lambda: rust_preprocessor.fit_transform(large_data.copy()))
@@ -2176,7 +2176,7 @@ class TestPerformanceImprovement:
         X_train = np.random.randn(10000, 20)
         y_train = (X_train[:, 0] > 0).astype(int)
         
-        engine = kolosal_rust.TrainEngine()
+        engine = automl_rust.TrainEngine()
         model = engine.train(X_train, y_train).best_model
         
         # Benchmark single prediction
@@ -2196,7 +2196,7 @@ class TestErrorHandling:
     
     def test_raises_on_unfitted_transform(self):
         """Should raise error when transforming unfitted preprocessor."""
-        preprocessor = kolosal_rust.DataPreprocessor()
+        preprocessor = automl_rust.DataPreprocessor()
         data = np.random.randn(10, 5)
         
         with pytest.raises(RuntimeError, match="not fitted"):
@@ -2204,7 +2204,7 @@ class TestErrorHandling:
     
     def test_raises_on_shape_mismatch(self):
         """Should raise error on feature count mismatch."""
-        preprocessor = kolosal_rust.DataPreprocessor()
+        preprocessor = automl_rust.DataPreprocessor()
         train_data = np.random.randn(100, 10)
         test_data = np.random.randn(10, 5)  # Different column count
         
@@ -2215,7 +2215,7 @@ class TestErrorHandling:
     
     def test_handles_empty_input(self):
         """Should handle empty arrays gracefully."""
-        preprocessor = kolosal_rust.DataPreprocessor()
+        preprocessor = automl_rust.DataPreprocessor()
         empty_data = np.array([]).reshape(0, 5)
         
         with pytest.raises(ValueError, match="empty"):
@@ -2229,7 +2229,7 @@ class TestErrorHandling:
 
 #![no_main]
 use libfuzzer_sys::fuzz_target;
-use kolosal_core::preprocessing::{DataPreprocessor, PreprocessorConfig};
+use automl_core::preprocessing::{DataPreprocessor, PreprocessorConfig};
 use ndarray::Array2;
 
 fuzz_target!(|data: (Vec<f64>, usize, usize)| {
@@ -2282,7 +2282,7 @@ cargo test --workspace
 cargo test --workspace -- --nocapture
 
 # Run specific test module
-cargo test --package kolosal-core preprocessing::
+cargo test --package automl-core preprocessing::
 
 # Run property tests with more cases
 PROPTEST_CASES=10000 cargo test --workspace

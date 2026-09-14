@@ -3,7 +3,7 @@
 //! These are unsupervised models — they take X only (no y labels).
 //! They implement `fit()` and `predict()` to assign cluster labels.
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::{Array1, Array2};
 use rand::SeedableRng;
 use rand::RngCore;
@@ -118,7 +118,7 @@ impl KMeans {
     pub fn fit(&mut self, x: &Array2<f64>) -> Result<&mut Self> {
         let n_samples = x.nrows();
         if n_samples < self.n_clusters {
-            return Err(KolosalError::TrainingError(format!(
+            return Err(AutoMLError::TrainingError(format!(
                 "n_samples ({}) < n_clusters ({})", n_samples, self.n_clusters
             )));
         }
@@ -209,7 +209,7 @@ impl KMeans {
     /// Predict cluster labels for new data
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         let centroids = self.centroids.as_ref()
-            .ok_or(KolosalError::ModelNotFitted)?;
+            .ok_or(AutoMLError::ModelNotFitted)?;
 
         let labels: Vec<f64> = (0..x.nrows())
             .into_par_iter()
@@ -369,9 +369,9 @@ impl DBSCAN {
     /// Predict cluster labels for new data by nearest core-point assignment
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         let train_x = self.train_x.as_ref()
-            .ok_or(KolosalError::ModelNotFitted)?;
+            .ok_or(AutoMLError::ModelNotFitted)?;
         let train_labels = self.labels.as_ref()
-            .ok_or(KolosalError::ModelNotFitted)?;
+            .ok_or(AutoMLError::ModelNotFitted)?;
 
         let labels: Vec<f64> = (0..x.nrows())
             .into_par_iter()

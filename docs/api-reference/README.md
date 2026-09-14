@@ -1,10 +1,10 @@
 # 📋 API Reference
 
-Complete API documentation for Kolosal AutoML - integrate machine learning capabilities into your applications.
+Complete API documentation for AutoML - integrate machine learning capabilities into your applications.
 
 ## 🎯 Overview
 
-The Kolosal AutoML API provides comprehensive endpoints for:
+The AutoML API provides comprehensive endpoints for:
 - 🚂 **Model Training** - Train ML models with automated hyperparameter optimization
 - ⚡ **Inference** - High-performance prediction services  
 - 🔄 **Data Processing** - Advanced data preprocessing and transformation
@@ -29,7 +29,7 @@ Most endpoints require API key authentication:
 
 ```bash
 # Get your API key from .env file or administrator
-export API_KEY="genta_your_api_key_here"
+export API_KEY="automl_your_api_key_here"
 
 # Use in requests
 curl -H "X-API-Key: $API_KEY" http://localhost:8000/api/models
@@ -54,7 +54,7 @@ curl -H "X-API-Key: $API_KEY" http://localhost:8000/api/models
 
 ```bash
 # Required header for most endpoints
-X-API-Key: genta_your_api_key_here
+X-API-Key: automl_your_api_key_here
 ```
 
 ### JWT Authentication (Advanced)
@@ -677,15 +677,15 @@ GET /metrics
 
 **Response (Prometheus format):**
 ```
-# HELP kolosal_api_requests_total Total API requests
-# TYPE kolosal_api_requests_total counter
-kolosal_api_requests_total{method="GET",endpoint="/health"} 1523
-kolosal_api_requests_total{method="POST",endpoint="/api/train"} 45
+# HELP automl_api_requests_total Total API requests
+# TYPE automl_api_requests_total counter
+automl_api_requests_total{method="GET",endpoint="/health"} 1523
+automl_api_requests_total{method="POST",endpoint="/api/train"} 45
 
-# HELP kolosal_model_training_duration_seconds Model training duration
-# TYPE kolosal_model_training_duration_seconds histogram
-kolosal_model_training_duration_seconds_bucket{le="300"} 12
-kolosal_model_training_duration_seconds_bucket{le="600"} 28
+# HELP automl_model_training_duration_seconds Model training duration
+# TYPE automl_model_training_duration_seconds histogram
+automl_model_training_duration_seconds_bucket{le="300"} 12
+automl_model_training_duration_seconds_bucket{le="600"} 28
 ```
 
 ## 🔧 Configuration
@@ -892,12 +892,12 @@ print(f"Confidence: {prediction['confidence_scores'][0]:.3f}")
 
 ## 🚀 Ready to Integrate?
 
-This API reference covers all endpoints available in Kolosal AutoML. For more specific examples:
+This API reference covers all endpoints available in AutoML. For more specific examples:
 
 - 🐍 **[Python Examples](examples/python.md)** - Complete Python integration examples
 - 🌐 **[JavaScript Examples](examples/javascript.md)** - Node.js and browser examples  
 - ⚡ **[cURL Examples](examples/curl.md)** - Command-line examples
 
-Need help? Check our [User Guides](../user-guides/) or [create an issue](https://github.com/Genta-Technology/kolosal-automl/issues) on GitHub.
+Need help? Check our [User Guides](../user-guides/) or [create an issue](https://github.com/Evintkoo/automl/issues) on GitHub.
 
-*API Reference v1.0 | Last updated: January 2025 | Kolosal AutoML v0.1.4*
+*API Reference v1.0 | Last updated: January 2025 | AutoML v0.1.4*

@@ -23,8 +23,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Configuration
 // ---------------------------------------------------------------------------
 
-const RUST_URL = 'https://kolosalautoml-production.up.railway.app/api/health';
-const PYTHON_URL = 'https://kolosal-automl-before-planout-production.up.railway.app/config';
+const RUST_URL = 'https://automlautoml-production.up.railway.app/api/health';
+const PYTHON_URL = 'https://automl-before-planout-production.up.railway.app/config';
 
 const QUICK_MODE = process.argv.includes('--quick');
 

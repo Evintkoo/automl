@@ -1,6 +1,6 @@
 # 👩‍💻 Development & Contributing
 
-Welcome to the development documentation for Kolosal AutoML! This section provides everything developers need to contribute to the project, set up development environments, and understand our development practices.
+Welcome to the development documentation for AutoML! This section provides everything developers need to contribute to the project, set up development environments, and understand our development practices.
 
 ## 🚀 Quick Start for Developers
 
@@ -14,8 +14,8 @@ Welcome to the development documentation for Kolosal AutoML! This section provid
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/kolosal-automl.git
-cd kolosal-automl
+git clone https://github.com/your-org/automl.git
+cd automl
 
 # Set up virtual environment
 python -m venv venv
@@ -72,7 +72,7 @@ pytest
 ## 🏗️ Project Structure
 
 ```
-kolosal-automl/
+automl/
 ├── 📁 modules/                 # Core business logic
 │   ├── model_manager/          # Model lifecycle management
 │   ├── training_engine/        # Training pipeline
@@ -373,7 +373,7 @@ twine upload --repository testpypi dist/*
 
 - **Discord**: Join our development community
 - **GitHub Issues**: Report bugs and request features
-- **Stack Overflow**: Tag questions with `kolosal-automl`
+- **Stack Overflow**: Tag questions with `automl`
 - **Weekly Meetings**: Open development discussions
 
 ### Contributing Opportunities

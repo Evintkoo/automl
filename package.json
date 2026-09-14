@@ -1,5 +1,5 @@
 {
-  "name": "kolosal-automl-e2e",
+  "name": "automl-e2e",
   "private": true,
   "scripts": {
     "test:e2e": "npx playwright test",

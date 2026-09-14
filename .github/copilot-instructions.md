@@ -1,4 +1,4 @@
-# Copilot Instructions for Kolosal AutoML
+# Copilot Instructions for AutoML
 
 You are an expert machine learning engineer and Rust systems programmer building a **local-first AutoML platform**. Everything runs on the user's machine — no cloud dependencies, no external API calls, no telemetry. Privacy and performance on commodity hardware are first-class concerns.
 
@@ -21,21 +21,21 @@ cargo bench --bench preprocessing  # Run preprocessing benchmarks
 cargo bench --bench training       # Run training benchmarks
 ```
 
-Binaries: `target/release/kolosal` (CLI) and `target/release/kolosal-server` (web server).
+Binaries: `target/release/automl` (CLI) and `target/release/automl-server` (web server).
 
-Start the dev server: `cargo run --package kolosal-automl --bin kolosal -- serve --port 8080`
+Start the dev server: `cargo run --package automl --bin automl -- serve --port 8080`
 
-Logging is controlled via `RUST_LOG` env var (defaults to `kolosal=info`). TTY gets human-readable output; non-TTY gets structured JSON.
+Logging is controlled via `RUST_LOG` env var (defaults to `automl=info`). TTY gets human-readable output; non-TTY gets structured JSON.
 
 ## Architecture
 
-This is a **single-crate Rust workspace** (`kolosal-automl`) that produces two binaries from one library:
+This is a **single-crate Rust workspace** (`automl`) that produces two binaries from one library:
 
 - **`src/lib.rs`** — The core library. All ML functionality lives here, organized into ~25 modules. A `prelude` module re-exports the most-used types.
 - **`src/main.rs`** — Entry point that dispatches CLI commands via `clap`. Running with no subcommand launches interactive mode.
 - **`src/server/`** — Axum-based HTTP server with REST API. State is managed via `AppState` (Arc-shared). Routes defined in `api.rs`, handlers in `handlers.rs`.
 - **`src/cli/`** — CLI command implementations (`cmd_train`, `cmd_predict`, `cmd_serve`, etc.).
-- **`kolosal-web/static/`** — Frontend assets (htmx + Alpine.js) served by the Axum server.
+- **`automl-web/static/`** — Frontend assets (htmx + Alpine.js) served by the Axum server.
 
 ### ML Pipeline Flow
 
@@ -91,7 +91,7 @@ When building serving features:
 
 ## Key Conventions
 
-- **Error handling**: Use `KolosalError` enum (in `src/error.rs`) and the `Result<T>` type alias. Each error variant is domain-specific (DataError, TrainingError, etc.). Convert external errors via `From` impls.
+- **Error handling**: Use `AutoMLError` enum (in `src/error.rs`) and the `Result<T>` type alias. Each error variant is domain-specific (DataError, TrainingError, etc.). Convert external errors via `From` impls.
 - **Data types**: `ndarray::Array2<f64>` is the standard matrix type for ML operations. `polars::DataFrame` is used for data loading and preprocessing. Convert between them at module boundaries.
 - **Serialization**: All model structs derive `Serialize`/`Deserialize` (serde). Models are serialized with bincode for binary format.
 - **Parallelism**: Uses `rayon` for data-parallel operations and `tokio` for async I/O (server, CLI async commands). Concurrent state uses `parking_lot` mutexes and `dashmap`.

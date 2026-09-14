@@ -1,4 +1,4 @@
-# Kolosal AutoML
+# AutoML
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -14,20 +14,24 @@
 cargo build --release
 
 # Train a model
-./target/release/kolosal train --data data.csv --target label --model random_forest
+./target/release/automl train --data data.csv --target label --model random_forest
 
 # Benchmark multiple models
-./target/release/kolosal benchmark --data data.csv --target label
+./target/release/automl benchmark --data data.csv --target label
 
 # Show data info
-./target/release/kolosal info --data data.csv
+./target/release/automl info --data data.csv
 ```
 
 ### Using the Web Server
 
 ```bash
+# Build the server (same binary as the CLI)
+cargo build --release
+
 # Start the server
-./target/release/kolosal-server --port 8080
+./target/release/automl serve --port 8080
+# or just: ./target/release/automl   (defaults to serving on 0.0.0.0:8080)
 
 # Open http://localhost:8080 in your browser
 ```
@@ -101,16 +105,16 @@ Full end-to-end pipeline (load + preprocess + train + predict + explain): **204 
 ## Project Structure
 
 ```
-kolosal_automl/
-├── kolosal-core/           # Core ML library
-├── kolosal-server/         # Axum web server
-├── kolosal-cli/            # CLI application
-├── kolosal-web/            # Web frontend assets
-├── legacy/                 # Legacy code (Python bindings, etc.)
-├── benches/                # Benchmarks
-├── examples/               # Example code
-├── docs/                   # Documentation
-└── tests/                  # Integration tests
+automl/
+├── src/                    # automl crate (lib + CLI/server binary)
+│   ├── cli/                # clap CLI, incl. the `serve` subcommand
+│   ├── server/              # Axum web server (mounted by `serve`)
+│   └── ...                 # preprocessing, training, models, etc.
+├── automl-web/             # Web frontend assets served by the server
+├── benches/                 # Benchmarks
+├── examples/                # Example code
+├── docs/                    # Documentation
+└── tests/                   # Integration tests
 ```
 
 ## Building from Source
@@ -122,18 +126,20 @@ kolosal_automl/
 ### Build
 
 ```bash
-# Build all crates
+# Build the crate (produces the `automl` binary, used as both CLI and server)
 cargo build --release
 
 # Run tests
-cargo test --workspace
+cargo test
 
 # Run the server
-cargo run --package kolosal-server
+cargo run -- serve --port 8080
 
 # Run the CLI
-cargo run --package kolosal-cli -- --help
+cargo run -- --help
 ```
+
+You can also use the [Makefile](#makefile) for the common commands above.
 
 ### Build Binaries
 
@@ -141,10 +147,27 @@ cargo run --package kolosal-cli -- --help
 # Optimized release build
 cargo build --release
 
-# Binaries will be in:
-# - target/release/kolosal-server
-# - target/release/kolosal
+# Binary will be in:
+# - target/release/automl   (run `automl serve` to start the web server)
 ```
+
+## Makefile
+
+Common tasks are wrapped in a `Makefile`:
+
+```bash
+make build      # cargo build --release
+make server     # build (if needed) and run the server on :8080
+make dev        # run the server via `cargo run` (debug build, faster iteration)
+make cli        # show CLI help
+make test       # cargo test
+make bench      # cargo bench
+make fmt        # cargo fmt
+make lint       # cargo clippy
+make clean      # cargo clean
+```
+
+Override the port/host with `PORT`/`HOST`, e.g. `make server PORT=9000`.
 
 ## API Reference
 
@@ -164,7 +187,7 @@ cargo build --release
 ## CLI Reference
 
 ```bash
-kolosal <COMMAND>
+automl <COMMAND>
 
 Commands:
   train       Train a model on data

@@ -1,11 +1,11 @@
 # 📖 Getting Started
 
-Welcome to Kolosal AutoML! This guide will get you up and running in just a few minutes.
+Welcome to AutoML! This guide will get you up and running in just a few minutes.
 
 ## 🎯 What You'll Learn
 
 By the end of this guide, you'll be able to:
-- ✅ Install Kolosal AutoML on your system
+- ✅ Install AutoML on your system
 - ✅ Configure your development environment  
 - ✅ Train your first machine learning model
 - ✅ Make predictions using the trained model
@@ -26,7 +26,7 @@ By the end of this guide, you'll be able to:
 
 ### Prerequisites
 
-Before installing Kolosal AutoML, make sure you have:
+Before installing AutoML, make sure you have:
 
 - **Python 3.10+** (Python 3.11 recommended)
 - **4GB+ RAM** (8GB+ recommended for larger datasets)
@@ -46,8 +46,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # 2. Clone the repository
-git clone https://github.com/Genta-Technology/kolosal-automl.git
-cd kolosal-automl
+git clone https://github.com/Evintkoo/automl.git
+cd automl
 
 # 3. Create and activate virtual environment
 uv venv
@@ -68,8 +68,8 @@ uv pip install xgboost lightgbm catboost
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/Genta-Technology/kolosal-automl.git
-cd kolosal-automl
+git clone https://github.com/Evintkoo/automl.git
+cd automl
 
 # 2. Create virtual environment
 python -m venv venv
@@ -94,8 +94,8 @@ For containerized deployment:
 
 ```bash
 # Clone and build
-git clone https://github.com/Genta-Technology/kolosal-automl.git
-cd kolosal-automl
+git clone https://github.com/Evintkoo/automl.git
+cd automl
 
 # Quick start with Docker Compose
 docker-compose up -d
@@ -144,10 +144,10 @@ For automatic compilation on startup:
 
 ```bash
 # Windows (PowerShell):
-$env:KOLOSAL_AUTO_COMPILE = "true"
+$env:AUTOML_AUTO_COMPILE = "true"
 
 # Linux/macOS:
-export KOLOSAL_AUTO_COMPILE=true
+export AUTOML_AUTO_COMPILE=true
 ```
 
 ## 🚀 First Steps
@@ -164,9 +164,9 @@ python main.py --system-info
 python -c "from modules.engine.train_engine import MLTrainingEngine; print('✅ Installation successful!')"
 ```
 
-### Launch Kolosal AutoML
+### Launch AutoML
 
-You have three ways to run Kolosal AutoML:
+You have three ways to run AutoML:
 
 ```bash
 # 1. Interactive mode (recommended for first-time users)
@@ -355,7 +355,7 @@ pip install -e ".[all]"
 ```bash
 # Enable optimizations:
 python main.py --compile
-export KOLOSAL_AUTO_COMPILE=true
+export AUTOML_AUTO_COMPILE=true
 
 # Check system resources:
 python main.py --system-info
@@ -400,7 +400,7 @@ If you encounter issues:
 
 ## 📚 Next Steps
 
-Congratulations! You now have Kolosal AutoML running. Here's what to explore next:
+Congratulations! You now have AutoML running. Here's what to explore next:
 
 ### 🎓 **Learn More**
 - [📖 **User Guides**](../user-guides/) - Detailed tutorials for specific tasks
@@ -422,9 +422,9 @@ Congratulations! You now have Kolosal AutoML running. Here's what to explore nex
 - [🤝 **Contributing**](../development/contributing.md) - Contribute to the project
 - [🧪 **Testing**](../development/testing.md) - Help improve quality
 
-## 🎉 Welcome to Kolosal AutoML!
+## 🎉 Welcome to AutoML!
 
-You're now ready to build amazing machine learning applications with Kolosal AutoML. The platform provides:
+You're now ready to build amazing machine learning applications with AutoML. The platform provides:
 
 - ✅ **Easy-to-use interfaces** for all skill levels
 - ✅ **Production-ready performance** with optimization features
@@ -436,6 +436,6 @@ Happy machine learning! 🚀
 
 ---
 
-**Need help?** Check out our [User Guides](../user-guides/) or [create an issue](https://github.com/Genta-Technology/kolosal-automl/issues) on GitHub.
+**Need help?** Check out our [User Guides](../user-guides/) or [create an issue](https://github.com/Evintkoo/automl/issues) on GitHub.
 
 *Getting Started Guide v1.0 | Last updated: January 2025*

@@ -87,7 +87,7 @@ fn test_fit_transform_delegates_to_with_cb() {
 - [ ] **Step 2: Run tests to confirm they fail**
 
 ```bash
-cd /Users/evintleovonzko/Documents/Works/Kolosal/kolosal_automl
+cd /Users/evintleovonzko/Documents/Works/AutoML/automl
 cargo test test_fit_transform_with_cb_fires_callbacks test_fit_transform_delegates_to_with_cb 2>&1 | tail -20
 ```
 
@@ -114,7 +114,7 @@ where
 {
     let n = data.len();
     if n < 3 {
-        return Err(crate::error::KolosalError::DataError(
+        return Err(crate::error::AutoMLError::DataError(
             "UMAP requires at least 3 samples".to_string(),
         ));
     }

@@ -89,7 +89,7 @@ pub struct ComplianceControl {
     pub status: ControlStatus,
     /// Evidence supporting the status
     pub evidence: Vec<String>,
-    /// Kolosal module implementing this control
+    /// AutoML module implementing this control
     pub implementing_module: Option<String>,
     /// Recommended action if not fully compliant
     pub recommendation: Option<String>,
@@ -100,8 +100,8 @@ pub struct ComplianceControl {
 pub struct ComplianceReport {
     /// Report generation timestamp
     pub generated_at: DateTime<Utc>,
-    /// Kolosal version
-    pub kolosal_version: String,
+    /// AutoML version
+    pub automl_version: String,
     /// Per-standard summaries
     pub standard_summaries: Vec<StandardSummary>,
     /// All individual controls
@@ -237,7 +237,7 @@ impl ComplianceChecker {
 
         ComplianceReport {
             generated_at: Utc::now(),
-            kolosal_version: env!("CARGO_PKG_VERSION").to_string(),
+            automl_version: env!("CARGO_PKG_VERSION").to_string(),
             standard_summaries,
             controls,
             overall_score,

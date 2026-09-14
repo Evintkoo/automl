@@ -1,6 +1,6 @@
 //! Integration test: Training pipeline end-to-end
 
-use kolosal_automl::training::{
+use automl::training::{
     TrainEngine, TrainingConfig, TaskType, ModelType, EnsembleStrategy,
 };
 use polars::prelude::*;
@@ -138,7 +138,7 @@ fn test_generate_report() {
 
     let report = engine.generate_report();
     assert!(!report.is_empty(), "report should not be empty");
-    assert!(report.contains("Kolosal AutoML"), "report should have header");
+    assert!(report.contains("AutoML"), "report should have header");
 }
 
 #[test]

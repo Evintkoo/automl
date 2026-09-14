@@ -620,7 +620,7 @@ function generateThroughputReportHTML(
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Kolosal AutoML - Model Throughput Benchmark</title>
+  <title>AutoML - Model Throughput Benchmark</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -645,7 +645,7 @@ function generateThroughputReportHTML(
   </style>
 </head>
 <body>
-  <h1>Kolosal AutoML &mdash; Model Throughput Benchmark</h1>
+  <h1>AutoML &mdash; Model Throughput Benchmark</h1>
   <p class="subtitle"><span class="rust">Rust</span> vs <span class="python">Python/Gradio</span> &mdash; Training throughput across ML model types (Iris dataset, 150 rows)</p>
 
   <div class="grid">

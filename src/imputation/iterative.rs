@@ -1,6 +1,6 @@
 //! Iterative imputer using various estimators
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::imputation::{Imputer, InitialStrategy, is_missing};
 use ndarray::{Array1, Array2};
 use rand::prelude::*;
@@ -387,7 +387,7 @@ impl Imputer for IterativeImputer {
 
     fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         if self.feature_means.is_none() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Imputer not fitted".to_string()
             ));
         }

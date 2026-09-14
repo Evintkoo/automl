@@ -1,6 +1,6 @@
 //! Integration test: Web UI structure, tabs, and sub-tabs
 
-use kolosal_automl::server::{AppState, ServerConfig, create_router};
+use automl::server::{AppState, ServerConfig, create_router};
 use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -11,8 +11,8 @@ fn test_app() -> axum::Router {
         host: "127.0.0.1".to_string(),
         port: 0,
         static_dir: None,
-        data_dir: "/tmp/kolosal-test-webui-data".to_string(),
-        models_dir: "/tmp/kolosal-test-webui-models".to_string(),
+        data_dir: "/tmp/automl-test-webui-data".to_string(),
+        models_dir: "/tmp/automl-test-webui-models".to_string(),
         max_upload_size: 10 * 1024 * 1024,
     };
     std::fs::create_dir_all(&config.data_dir).ok();

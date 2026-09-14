@@ -1,6 +1,6 @@
 //! Integration test: Security module
 
-use kolosal_automl::security::{
+use automl::security::{
     SecurityManager, SecurityConfig, ApiKeyVerifier, RateLimiter, RateLimitConfig,
     RateLimitAlgorithm, SecretsManager, SecretType, TlsManager, TlsConfig,
 };
@@ -134,7 +134,7 @@ fn test_rate_limiter_reset() {
 
 #[test]
 fn test_secrets_manager() {
-    let tmp_dir = std::env::temp_dir().join(format!("kolosal_test_secrets_{}", std::process::id()));
+    let tmp_dir = std::env::temp_dir().join(format!("automl_test_secrets_{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).ok();
     let path = tmp_dir.join(".secrets");
     let manager = SecretsManager::new(path.to_str().unwrap());
@@ -165,7 +165,7 @@ fn test_secrets_manager() {
 
 #[test]
 fn test_secrets_generate() {
-    let tmp_dir = std::env::temp_dir().join(format!("kolosal_test_gen_{}", std::process::id()));
+    let tmp_dir = std::env::temp_dir().join(format!("automl_test_gen_{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).ok();
     let path = tmp_dir.join(".secrets");
     let manager = SecretsManager::new(path.to_str().unwrap());
@@ -181,7 +181,7 @@ fn test_secrets_generate() {
 
 #[test]
 fn test_secrets_strength_assessment() {
-    let tmp_dir = std::env::temp_dir().join(format!("kolosal_test_str_{}", std::process::id()));
+    let tmp_dir = std::env::temp_dir().join(format!("automl_test_str_{}", std::process::id()));
     std::fs::create_dir_all(&tmp_dir).ok();
     let path = tmp_dir.join(".secrets");
     let manager = SecretsManager::new(path.to_str().unwrap());

@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::{Read, Write, BufReader, BufWriter};
 use std::path::Path;
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 
 /// Serialization format
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -126,7 +126,7 @@ pub struct SerializedModel {
 }
 
 impl SerializedModel {
-    /// Magic bytes for Kolosal model files
+    /// Magic bytes for AutoML model files
     const MAGIC: [u8; 4] = [b'K', b'O', b'L', b'M'];
     /// Current format version
     const VERSION: u32 = 1;
@@ -170,28 +170,28 @@ pub trait ModelSerializer: Serialize + for<'de> Deserialize<'de> + Sized {
     /// Serialize to bytes using binary format
     fn to_bytes(&self) -> Result<Vec<u8>> {
         bincode::serialize(self).map_err(|e| {
-            KolosalError::SerializationError(format!("Failed to serialize: {}", e))
+            AutoMLError::SerializationError(format!("Failed to serialize: {}", e))
         })
     }
 
     /// Deserialize from bytes
     fn from_bytes(data: &[u8]) -> Result<Self> {
         bincode::deserialize(data).map_err(|e| {
-            KolosalError::SerializationError(format!("Failed to deserialize: {}", e))
+            AutoMLError::SerializationError(format!("Failed to deserialize: {}", e))
         })
     }
 
     /// Serialize to JSON string
     fn to_json(&self) -> Result<String> {
         serde_json::to_string_pretty(self).map_err(|e| {
-            KolosalError::SerializationError(format!("Failed to serialize to JSON: {}", e))
+            AutoMLError::SerializationError(format!("Failed to serialize to JSON: {}", e))
         })
     }
 
     /// Deserialize from JSON string
     fn from_json(json: &str) -> Result<Self> {
         serde_json::from_str(json).map_err(|e| {
-            KolosalError::SerializationError(format!("Failed to deserialize from JSON: {}", e))
+            AutoMLError::SerializationError(format!("Failed to deserialize from JSON: {}", e))
         })
     }
 
@@ -201,22 +201,22 @@ pub trait ModelSerializer: Serialize + for<'de> Deserialize<'de> + Sized {
         let serialized = SerializedModel::new(self.metadata(), model_data);
         
         let file = File::create(path.as_ref()).map_err(|e| {
-            KolosalError::DataError(format!("Failed to create file: {}", e))
+            AutoMLError::DataError(format!("Failed to create file: {}", e))
         })?;
         let mut writer = BufWriter::new(file);
 
         match format {
             SerializationFormat::Binary => {
                 let bytes = bincode::serialize(&serialized).map_err(|e| {
-                    KolosalError::SerializationError(format!("Failed to serialize: {}", e))
+                    AutoMLError::SerializationError(format!("Failed to serialize: {}", e))
                 })?;
                 writer.write_all(&bytes).map_err(|e| {
-                    KolosalError::DataError(format!("Failed to write: {}", e))
+                    AutoMLError::DataError(format!("Failed to write: {}", e))
                 })?;
             }
             SerializationFormat::Json => {
                 serde_json::to_writer_pretty(&mut writer, &serialized).map_err(|e| {
-                    KolosalError::SerializationError(format!("Failed to write JSON: {}", e))
+                    AutoMLError::SerializationError(format!("Failed to write JSON: {}", e))
                 })?;
             }
         }
@@ -227,7 +227,7 @@ pub trait ModelSerializer: Serialize + for<'de> Deserialize<'de> + Sized {
     /// Load from file
     fn load(path: impl AsRef<Path>, format: SerializationFormat) -> Result<Self> {
         let file = File::open(path.as_ref()).map_err(|e| {
-            KolosalError::DataError(format!("Failed to open file: {}", e))
+            AutoMLError::DataError(format!("Failed to open file: {}", e))
         })?;
         let mut reader = BufReader::new(file);
 
@@ -235,22 +235,22 @@ pub trait ModelSerializer: Serialize + for<'de> Deserialize<'de> + Sized {
             SerializationFormat::Binary => {
                 let mut bytes = Vec::new();
                 reader.read_to_end(&mut bytes).map_err(|e| {
-                    KolosalError::DataError(format!("Failed to read: {}", e))
+                    AutoMLError::DataError(format!("Failed to read: {}", e))
                 })?;
                 bincode::deserialize(&bytes).map_err(|e| {
-                    KolosalError::SerializationError(format!("Failed to deserialize: {}", e))
+                    AutoMLError::SerializationError(format!("Failed to deserialize: {}", e))
                 })?
             }
             SerializationFormat::Json => {
                 serde_json::from_reader(&mut reader).map_err(|e| {
-                    KolosalError::SerializationError(format!("Failed to read JSON: {}", e))
+                    AutoMLError::SerializationError(format!("Failed to read JSON: {}", e))
                 })?
             }
         };
 
         // Verify checksum
         if !serialized.verify_checksum() {
-            return Err(KolosalError::SerializationError(
+            return Err(AutoMLError::SerializationError(
                 "Checksum verification failed - file may be corrupted".to_string()
             ));
         }
@@ -266,18 +266,18 @@ pub fn save_model<M: Serialize>(
     metadata: ModelMetadata,
 ) -> Result<()> {
     let model_data = bincode::serialize(model).map_err(|e| {
-        KolosalError::SerializationError(format!("Failed to serialize: {}", e))
+        AutoMLError::SerializationError(format!("Failed to serialize: {}", e))
     })?;
     
     let serialized = SerializedModel::new(metadata, model_data);
     
     let file = File::create(path.as_ref()).map_err(|e| {
-        KolosalError::DataError(format!("Failed to create file: {}", e))
+        AutoMLError::DataError(format!("Failed to create file: {}", e))
     })?;
     let writer = BufWriter::new(file);
 
     bincode::serialize_into(writer, &serialized).map_err(|e| {
-        KolosalError::SerializationError(format!("Failed to write: {}", e))
+        AutoMLError::SerializationError(format!("Failed to write: {}", e))
     })?;
 
     Ok(())
@@ -286,22 +286,22 @@ pub fn save_model<M: Serialize>(
 /// Load a model from file
 pub fn load_model<M: for<'de> Deserialize<'de>>(path: impl AsRef<Path>) -> Result<(M, ModelMetadata)> {
     let file = File::open(path.as_ref()).map_err(|e| {
-        KolosalError::DataError(format!("Failed to open file: {}", e))
+        AutoMLError::DataError(format!("Failed to open file: {}", e))
     })?;
     let reader = BufReader::new(file);
 
     let serialized: SerializedModel = bincode::deserialize_from(reader).map_err(|e| {
-        KolosalError::SerializationError(format!("Failed to deserialize: {}", e))
+        AutoMLError::SerializationError(format!("Failed to deserialize: {}", e))
     })?;
 
     if !serialized.verify_checksum() {
-        return Err(KolosalError::SerializationError(
+        return Err(AutoMLError::SerializationError(
             "Checksum verification failed".to_string()
         ));
     }
 
     let model: M = bincode::deserialize(&serialized.model_data).map_err(|e| {
-        KolosalError::SerializationError(format!("Failed to deserialize model: {}", e))
+        AutoMLError::SerializationError(format!("Failed to deserialize model: {}", e))
     })?;
 
     Ok((model, serialized.metadata))
@@ -325,12 +325,12 @@ pub fn save_model_json<M: Serialize>(
     };
 
     let file = File::create(path.as_ref()).map_err(|e| {
-        KolosalError::DataError(format!("Failed to create file: {}", e))
+        AutoMLError::DataError(format!("Failed to create file: {}", e))
     })?;
     let writer = BufWriter::new(file);
 
     serde_json::to_writer_pretty(writer, &json_model).map_err(|e| {
-        KolosalError::SerializationError(format!("Failed to write JSON: {}", e))
+        AutoMLError::SerializationError(format!("Failed to write JSON: {}", e))
     })?;
 
     Ok(())
@@ -347,12 +347,12 @@ pub fn load_model_json<M: for<'de> Deserialize<'de>>(
     }
 
     let file = File::open(path.as_ref()).map_err(|e| {
-        KolosalError::DataError(format!("Failed to open file: {}", e))
+        AutoMLError::DataError(format!("Failed to open file: {}", e))
     })?;
     let reader = BufReader::new(file);
 
     let json_model: JsonModel<M> = serde_json::from_reader(reader).map_err(|e| {
-        KolosalError::SerializationError(format!("Failed to read JSON: {}", e))
+        AutoMLError::SerializationError(format!("Failed to read JSON: {}", e))
     })?;
 
     Ok((json_model.model, json_model.metadata))

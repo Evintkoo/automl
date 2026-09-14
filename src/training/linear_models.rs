@@ -1,6 +1,6 @@
 //! Linear model implementations
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::{Array1, Array2, Axis};
 use serde::{Deserialize, Serialize};
 
@@ -244,7 +244,7 @@ impl LinearRegression {
         let n_features = x.ncols();
 
         if n_samples != y.len() {
-            return Err(KolosalError::ShapeError {
+            return Err(AutoMLError::ShapeError {
                 expected: format!("y length = {}", n_samples),
                 actual: format!("y length = {}", y.len()),
             });
@@ -280,7 +280,7 @@ impl LinearRegression {
                 match matrix_inverse(&xtx) {
                     Some(inv) => inv.dot(&xty),
                     None => {
-                        return Err(KolosalError::ComputationError(
+                        return Err(AutoMLError::ComputationError(
                             "Matrix is singular, cannot compute inverse".to_string()
                         ));
                     }
@@ -291,7 +291,7 @@ impl LinearRegression {
             match solve_least_squares(&x_centered, &y_centered) {
                 Some(coef) => coef,
                 None => {
-                    return Err(KolosalError::ComputationError(
+                    return Err(AutoMLError::ComputationError(
                         "Matrix is singular, cannot solve least squares".to_string()
                     ));
                 }
@@ -317,7 +317,7 @@ impl LinearRegression {
     /// Make predictions
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         let coefficients = self.coefficients.as_ref().unwrap();
@@ -414,7 +414,7 @@ impl LogisticRegression {
         let n_features = x.ncols();
 
         if n_samples != y.len() {
-            return Err(KolosalError::ShapeError {
+            return Err(AutoMLError::ShapeError {
                 expected: format!("y length = {}", n_samples),
                 actual: format!("y length = {}", y.len()),
             });
@@ -480,7 +480,7 @@ impl LogisticRegression {
     /// Predict probabilities
     pub fn predict_proba(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         let coefficients = self.coefficients.as_ref().unwrap();
@@ -545,7 +545,7 @@ impl RidgeRegression {
         let n_samples = x.nrows();
         let n_features = x.ncols();
         if n_samples != y.len() {
-            return Err(KolosalError::ShapeError {
+            return Err(AutoMLError::ShapeError {
                 expected: format!("y length = {}", n_samples),
                 actual: format!("y length = {}", y.len()),
             });
@@ -571,7 +571,7 @@ impl RidgeRegression {
         } else {
             match matrix_inverse(&xtx) {
                 Some(inv) => inv.dot(&xty),
-                None => return Err(KolosalError::ComputationError("Singular matrix".to_string())),
+                None => return Err(AutoMLError::ComputationError("Singular matrix".to_string())),
             }
         };
 
@@ -587,7 +587,7 @@ impl RidgeRegression {
 
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
         Ok(x.dot(self.coefficients.as_ref().unwrap()) + self.intercept.unwrap_or(0.0))
     }
@@ -658,7 +658,7 @@ impl LassoRegression {
         let n_samples = x.nrows();
         let n_features = x.ncols();
         if n_samples != y.len() {
-            return Err(KolosalError::ShapeError {
+            return Err(AutoMLError::ShapeError {
                 expected: format!("y length = {}", n_samples),
                 actual: format!("y length = {}", y.len()),
             });
@@ -723,7 +723,7 @@ impl LassoRegression {
 
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
         Ok(x.dot(self.coefficients.as_ref().unwrap()) + self.intercept.unwrap_or(0.0))
     }
@@ -791,7 +791,7 @@ impl ElasticNetRegression {
         let n_samples = x.nrows();
         let n_features = x.ncols();
         if n_samples != y.len() {
-            return Err(KolosalError::ShapeError {
+            return Err(AutoMLError::ShapeError {
                 expected: format!("y length = {}", n_samples),
                 actual: format!("y length = {}", y.len()),
             });
@@ -856,7 +856,7 @@ impl ElasticNetRegression {
 
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
         Ok(x.dot(self.coefficients.as_ref().unwrap()) + self.intercept.unwrap_or(0.0))
     }
@@ -1074,7 +1074,7 @@ impl PolynomialRegression {
 
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if !self.is_fitted {
-            return Err(KolosalError::TrainingError("Model not fitted".into()));
+            return Err(AutoMLError::TrainingError("Model not fitted".into()));
         }
         let x_poly = Self::expand_features(x, self.degree);
         self.inner.predict(&x_poly)

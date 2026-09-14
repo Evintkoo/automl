@@ -1,6 +1,6 @@
 //! Temperature scaling calibration
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::calibration::Calibrator;
 use ndarray::Array1;
 use serde::{Deserialize, Serialize};
@@ -107,13 +107,13 @@ impl Calibrator for TemperatureScaling {
     fn fit(&mut self, probs: &Array1<f64>, labels: &Array1<f64>) -> Result<()> {
         let n = probs.len();
         if n != labels.len() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Probabilities and labels must have same length".to_string(),
             ));
         }
 
         if n == 0 {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Empty input".to_string(),
             ));
         }
@@ -158,7 +158,7 @@ impl Calibrator for TemperatureScaling {
 
     fn calibrate(&self, probs: &Array1<f64>) -> Result<Array1<f64>> {
         let t = self.temperature.ok_or_else(|| {
-            KolosalError::ValidationError("Calibrator not fitted".to_string())
+            AutoMLError::ValidationError("Calibrator not fitted".to_string())
         })?;
 
         let calibrated: Vec<f64> = probs
@@ -228,7 +228,7 @@ impl Calibrator for BetaCalibration {
     fn fit(&mut self, probs: &Array1<f64>, labels: &Array1<f64>) -> Result<()> {
         let n = probs.len();
         if n != labels.len() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Probabilities and labels must have same length".to_string(),
             ));
         }
@@ -285,7 +285,7 @@ impl Calibrator for BetaCalibration {
 
     fn calibrate(&self, probs: &Array1<f64>) -> Result<Array1<f64>> {
         let (a, b, c) = self.parameters().ok_or_else(|| {
-            KolosalError::ValidationError("Calibrator not fitted".to_string())
+            AutoMLError::ValidationError("Calibrator not fitted".to_string())
         })?;
 
         let calibrated: Vec<f64> = probs

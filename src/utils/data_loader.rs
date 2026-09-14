@@ -1,6 +1,6 @@
 //! Data loading utilities
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use polars::prelude::*;
 use std::path::Path;
 use std::io::{BufRead, BufReader};
@@ -54,7 +54,7 @@ impl DataLoader {
     /// Load a CSV file
     pub fn load_csv(&self, path: &str) -> Result<DataFrame> {
         let file = File::open(path)
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         let reader = CsvReadOptions::default()
             .with_has_header(true)
@@ -62,7 +62,7 @@ impl DataLoader {
             .into_reader_with_file_handle(file);
 
         reader.finish()
-            .map_err(|e| KolosalError::DataError(e.to_string()))
+            .map_err(|e| AutoMLError::DataError(e.to_string()))
     }
 
     /// Load a CSV file with specific options
@@ -75,7 +75,7 @@ impl DataLoader {
         _columns: Option<Vec<String>>,
     ) -> Result<DataFrame> {
         let file = File::open(path)
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         let parse_opts = CsvParseOptions::default()
             .with_separator(delimiter);
@@ -88,39 +88,39 @@ impl DataLoader {
             .into_reader_with_file_handle(file);
 
         reader.finish()
-            .map_err(|e| KolosalError::DataError(e.to_string()))
+            .map_err(|e| AutoMLError::DataError(e.to_string()))
     }
 
     /// Load a Parquet file
     pub fn load_parquet(&self, path: &str) -> Result<DataFrame> {
         let file = File::open(path)
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         let reader = ParquetReader::new(file);
 
         reader.finish()
-            .map_err(|e| KolosalError::DataError(e.to_string()))
+            .map_err(|e| AutoMLError::DataError(e.to_string()))
     }
 
     /// Load a Parquet file with specific columns
     pub fn load_parquet_columns(&self, path: &str, columns: Vec<String>) -> Result<DataFrame> {
         let file = File::open(path)
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         ParquetReader::new(file)
             .with_columns(Some(columns))
             .finish()
-            .map_err(|e| KolosalError::DataError(e.to_string()))
+            .map_err(|e| AutoMLError::DataError(e.to_string()))
     }
 
     /// Load a JSON file (line-delimited)
     pub fn load_json(&self, path: &str) -> Result<DataFrame> {
         let file = File::open(path)
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         JsonReader::new(file)
             .finish()
-            .map_err(|e| KolosalError::DataError(e.to_string()))
+            .map_err(|e| AutoMLError::DataError(e.to_string()))
     }
 
     /// Detect file format from extension and load
@@ -143,21 +143,21 @@ impl DataLoader {
     /// Get file info without loading full data
     pub fn get_file_info(&self, path: &str) -> Result<FileInfo> {
         let metadata = std::fs::metadata(path)
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         let file_size = metadata.len();
         
         // Quick row count for CSV
         let (n_rows, n_cols, columns) = if path.to_lowercase().ends_with(".csv") {
             let file = File::open(path)
-                .map_err(|e| KolosalError::DataError(e.to_string()))?;
+                .map_err(|e| AutoMLError::DataError(e.to_string()))?;
             let reader = BufReader::new(file);
             let mut lines = reader.lines();
             
             // Get header
             let header = lines.next()
                 .transpose()
-                .map_err(|e| KolosalError::DataError(e.to_string()))?
+                .map_err(|e| AutoMLError::DataError(e.to_string()))?
                 .unwrap_or_default();
             
             let columns: Vec<String> = header.split(',')
@@ -217,7 +217,7 @@ impl ChunkedReader {
         let skip_rows = self.current_chunk * self.chunk_size;
         
         let file = File::open(&self.path)
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         let df = CsvReadOptions::default()
             .with_has_header(self.current_chunk == 0)
@@ -225,7 +225,7 @@ impl ChunkedReader {
             .with_n_rows(Some(self.chunk_size))
             .into_reader_with_file_handle(file)
             .finish()
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         if df.height() == 0 {
             return Ok(None);
@@ -253,21 +253,21 @@ impl DataSaver {
     /// Save to CSV
     pub fn save_csv(df: &mut DataFrame, path: &str) -> Result<()> {
         let mut file = File::create(path)
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         CsvWriter::new(&mut file)
             .finish(df)
-            .map_err(|e| KolosalError::DataError(e.to_string()))
+            .map_err(|e| AutoMLError::DataError(e.to_string()))
     }
 
     /// Save to Parquet
     pub fn save_parquet(df: &mut DataFrame, path: &str) -> Result<()> {
         let file = File::create(path)
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         ParquetWriter::new(file)
             .finish(df)
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         Ok(())
     }
@@ -275,11 +275,11 @@ impl DataSaver {
     /// Save to JSON
     pub fn save_json(df: &mut DataFrame, path: &str) -> Result<()> {
         let mut file = File::create(path)
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         JsonWriter::new(&mut file)
             .finish(df)
-            .map_err(|e| KolosalError::DataError(e.to_string()))
+            .map_err(|e| AutoMLError::DataError(e.to_string()))
     }
 }
 
@@ -371,7 +371,7 @@ impl OptimizedDataLoader {
     pub fn estimate_file_complexity(file_path: &str) -> Result<(DatasetSize, f64)> {
         let path = Path::new(file_path);
         let metadata = std::fs::metadata(path)
-            .map_err(|e| KolosalError::DataError(format!("Cannot stat file: {e}")))?;
+            .map_err(|e| AutoMLError::DataError(format!("Cannot stat file: {e}")))?;
         let file_size = metadata.len();
         let file_size_mb = file_size as f64 / (1024.0 * 1024.0);
 
@@ -380,7 +380,7 @@ impl OptimizedDataLoader {
         let estimated_rows: usize = match ext.to_lowercase().as_str() {
             "csv" | "tsv" => {
                 let f = File::open(path)
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?;
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?;
                 let reader = BufReader::new(f);
                 let mut lines = reader.lines();
 
@@ -388,7 +388,7 @@ impl OptimizedDataLoader {
                 let header = lines
                     .next()
                     .transpose()
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?
                     .unwrap_or_default();
                 let header_len = header.len() + 1; // +1 for newline
 
@@ -396,7 +396,7 @@ impl OptimizedDataLoader {
                 let mut sample_bytes: usize = 0;
                 let mut sample_count: usize = 0;
                 for line in lines.take(100) {
-                    let l = line.map_err(|e| KolosalError::DataError(e.to_string()))?;
+                    let l = line.map_err(|e| AutoMLError::DataError(e.to_string()))?;
                     sample_bytes += l.len() + 1;
                     sample_count += 1;
                 }

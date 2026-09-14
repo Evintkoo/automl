@@ -1,6 +1,6 @@
 //! Time series transformations
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::Array1;
 use serde::{Deserialize, Serialize};
 
@@ -57,7 +57,7 @@ impl Differencer {
     /// Inverse differencing
     pub fn inverse_transform(&self, series: &Array1<f64>) -> Result<Array1<f64>> {
         let initial = self.initial_values.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Differencer not fitted".to_string())
+            AutoMLError::ValidationError("Differencer not fitted".to_string())
         })?;
 
         let mut result = series.clone();
@@ -187,7 +187,7 @@ impl SeasonalDecomposer {
         let n = series.len();
         
         if n < self.period * 2 {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "Series too short for decomposition".to_string(),
             ));
         }
@@ -258,7 +258,7 @@ impl SeasonalDecomposer {
     /// Remove seasonality from series
     pub fn deseasonalize(&self, series: &Array1<f64>) -> Result<Array1<f64>> {
         let pattern = self.seasonal_pattern.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Decomposer not fitted".to_string())
+            AutoMLError::ValidationError("Decomposer not fitted".to_string())
         })?;
 
         let n = series.len();
@@ -284,7 +284,7 @@ impl SeasonalDecomposer {
     /// Add seasonality back to series
     pub fn reseasonalize(&self, series: &Array1<f64>) -> Result<Array1<f64>> {
         let pattern = self.seasonal_pattern.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Decomposer not fitted".to_string())
+            AutoMLError::ValidationError("Decomposer not fitted".to_string())
         })?;
 
         let n = series.len();

@@ -1,6 +1,6 @@
 # 🛠️ Technical Documentation
 
-Welcome to the technical documentation for Kolosal AutoML. This section provides deep technical insights into the platform's architecture, algorithms, and advanced features for developers, ML engineers, and system administrators.
+Welcome to the technical documentation for AutoML. This section provides deep technical insights into the platform's architecture, algorithms, and advanced features for developers, ML engineers, and system administrators.
 
 ## 🏗️ Architecture Overview
 

@@ -1,6 +1,6 @@
 //! Cross-validation implementations
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::{Array1, Array2, Axis};
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -67,7 +67,7 @@ impl CrossValidator {
                 self.k_fold_split(n_samples, *n_splits, *shuffle)
             }
             CVStrategy::StratifiedKFold { n_splits, shuffle } => {
-                let y = y.ok_or_else(|| KolosalError::ValidationError(
+                let y = y.ok_or_else(|| AutoMLError::ValidationError(
                     "StratifiedKFold requires target array".to_string()
                 ))?;
                 self.stratified_k_fold_split(n_samples, y, *n_splits, *shuffle)
@@ -79,7 +79,7 @@ impl CrossValidator {
                 self.leave_one_out_split(n_samples)
             }
             CVStrategy::GroupKFold { n_splits } => {
-                let groups = groups.ok_or_else(|| KolosalError::ValidationError(
+                let groups = groups.ok_or_else(|| AutoMLError::ValidationError(
                     "GroupKFold requires groups array".to_string()
                 ))?;
                 self.group_k_fold_split(n_samples, groups, *n_splits)
@@ -92,12 +92,12 @@ impl CrossValidator {
 
     fn k_fold_split(&self, n_samples: usize, n_splits: usize, shuffle: bool) -> Result<Vec<CVSplit>> {
         if n_splits < 2 {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "n_splits must be at least 2".to_string()
             ));
         }
         if n_samples < n_splits {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 format!("n_samples ({}) must be >= n_splits ({})", n_samples, n_splits)
             ));
         }
@@ -209,7 +209,7 @@ impl CrossValidator {
         max_train_size: Option<usize>,
     ) -> Result<Vec<CVSplit>> {
         if n_splits < 2 {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "n_splits must be at least 2".to_string()
             ));
         }
@@ -266,7 +266,7 @@ impl CrossValidator {
         unique_groups.dedup();
 
         if unique_groups.len() < n_splits {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 format!("Number of groups ({}) must be >= n_splits ({})", unique_groups.len(), n_splits)
             ));
         }

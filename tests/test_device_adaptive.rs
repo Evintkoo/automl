@@ -1,14 +1,14 @@
 //! Integration test: Device optimizer and adaptive modules
 
-use kolosal_automl::device::DeviceOptimizer;
-use kolosal_automl::adaptive::{
+use automl::device::DeviceOptimizer;
+use automl::adaptive::{
     ConfigOptimizer, DatasetCharacteristics, DatasetSize, ProcessingMode,
     AdaptiveHyperparameterOptimizer, PerformanceTracker,
     SearchSpaceConfig,
 };
-use kolosal_automl::precision::{MixedPrecisionManager, MixedPrecisionConfig};
-use kolosal_automl::memory::{MemoryMonitor, AdaptiveChunkProcessor};
-use kolosal_automl::monitoring::{AlertManager, AlertLevel, Alert, AlertCondition, SystemMonitor};
+use automl::precision::{MixedPrecisionManager, MixedPrecisionConfig};
+use automl::memory::{MemoryMonitor, AdaptiveChunkProcessor};
+use automl::monitoring::{AlertManager, AlertLevel, Alert, AlertCondition, SystemMonitor};
 use std::collections::HashMap;
 
 // ============================================================================
@@ -83,7 +83,7 @@ fn test_adaptive_preprocessor_config() {
         dataset_size: DatasetSize::Medium,
     };
 
-    use kolosal_automl::adaptive::AdaptivePreprocessorConfig;
+    use automl::adaptive::AdaptivePreprocessorConfig;
     let strategy = AdaptivePreprocessorConfig::determine_strategy(&characteristics);
     assert!(
         matches!(strategy, ProcessingMode::Speed | ProcessingMode::Balanced | ProcessingMode::Quality | ProcessingMode::Memory | ProcessingMode::LargeScale),
@@ -157,7 +157,7 @@ fn test_adaptive_hyperopt_optimizer() {
         },
     );
 
-    let config = kolosal_automl::adaptive::AdaptiveHyperoptConfig {
+    let config = automl::adaptive::AdaptiveHyperoptConfig {
         n_trials: 10,
         timeout_secs: 30.0,
         n_startup: 3,

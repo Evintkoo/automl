@@ -1,6 +1,6 @@
 //! MICE (Multiple Imputation by Chained Equations) imputer
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::imputation::{Imputer, InitialStrategy, is_missing};
 use ndarray::{Array1, Array2};
 use rand::prelude::*;
@@ -311,7 +311,7 @@ impl Imputer for MICEImputer {
 
     fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
         let _stats = self.feature_stats.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Imputer not fitted".to_string())
+            AutoMLError::ValidationError("Imputer not fitted".to_string())
         })?;
 
         let mut result = x.clone();

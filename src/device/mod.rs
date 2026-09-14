@@ -7,7 +7,7 @@
 //!
 //! # Example
 //! ```no_run
-//! use kolosal_automl::device::DeviceOptimizer;
+//! use automl::device::DeviceOptimizer;
 //!
 //! let optimizer = DeviceOptimizer::new();
 //! let hw = &optimizer.hardware;

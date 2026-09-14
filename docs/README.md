@@ -1,10 +1,10 @@
-# 📚 Kolosal AutoML Documentation
+# 📚 AutoML Documentation
 
-Welcome to the comprehensive documentation for **Kolosal AutoML** — a high-performance automated machine learning framework written in pure Rust.
+Welcome to the comprehensive documentation for **AutoML** — a high-performance automated machine learning framework written in pure Rust.
 
 ## 🎯 Quick Navigation
 
-### 👋 New to Kolosal AutoML?
+### 👋 New to AutoML?
 - [📖 **Getting Started**](getting-started/) — Installation, setup, and first steps
 - [🎓 **User Guides**](user-guides/) — Step-by-step tutorials for common tasks
 - [💻 **Web Interface Guide**](user-guides/web-interface.md) — Using the built-in web UI
@@ -23,9 +23,9 @@ Welcome to the comprehensive documentation for **Kolosal AutoML** — a high-per
 
 ---
 
-## 🚀 What is Kolosal AutoML?
+## 🚀 What is AutoML?
 
-Kolosal AutoML is a comprehensive, production-ready machine learning platform written in pure Rust that provides:
+AutoML is a comprehensive, production-ready machine learning platform written in pure Rust that provides:
 
 - **Automated model training** with 8+ algorithm families
 - **Hyperparameter optimization** (Bayesian, TPE, ASHT)
@@ -39,8 +39,8 @@ Kolosal AutoML is a comprehensive, production-ready machine learning platform wr
 ### Installation
 ```bash
 # Clone the repository
-git clone https://github.com/KolosalAI/kolosal_automl.git
-cd kolosal_automl
+git clone https://github.com/Evintkoo/automl.git
+cd automl
 
 # Build
 cargo build --release
@@ -68,7 +68,7 @@ cargo run --release -- benchmark --data data.csv --target label
 
 #### Rust API
 ```rust
-use kolosal_automl::prelude::*;
+use automl::prelude::*;
 use polars::prelude::*;
 
 // Load data
@@ -92,7 +92,7 @@ let predictions = engine.predict(&df)?;
 ## Architecture Overview
 
 ```
-kolosal-automl/
+automl/
 ├── src/
 │   ├── lib.rs                  # Library root with prelude
 │   ├── main.rs                 # CLI entry point
@@ -139,7 +139,7 @@ kolosal-automl/
 ├── examples/                   # Usage examples
 ├── tests/                      # Integration tests
 ├── benches/                    # Benchmarks (criterion)
-├── kolosal-web/                # Web UI (htmx + Alpine.js)
+├── automl-web/                # Web UI (htmx + Alpine.js)
 └── docs/                       # Documentation
 ```
 

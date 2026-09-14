@@ -122,7 +122,7 @@ impl Umap {
     {
         let n = data.len();
         if n < 3 {
-            return Err(crate::error::KolosalError::DataError(
+            return Err(crate::error::AutoMLError::DataError(
                 "UMAP requires at least 3 samples".to_string(),
             ));
         }

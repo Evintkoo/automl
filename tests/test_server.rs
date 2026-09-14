@@ -1,6 +1,6 @@
 //! Integration test: Server API endpoints
 
-use kolosal_automl::server::{AppState, ServerConfig, create_router};
+use automl::server::{AppState, ServerConfig, create_router};
 use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -11,8 +11,8 @@ fn test_app() -> axum::Router {
         host: "127.0.0.1".to_string(),
         port: 0,
         static_dir: None,
-        data_dir: "/tmp/kolosal-test-data".to_string(),
-        models_dir: "/tmp/kolosal-test-models".to_string(),
+        data_dir: "/tmp/automl-test-data".to_string(),
+        models_dir: "/tmp/automl-test-models".to_string(),
         max_upload_size: 10 * 1024 * 1024,
     };
     std::fs::create_dir_all(&config.data_dir).ok();
@@ -255,8 +255,8 @@ async fn test_train_endpoint() {
         host: "127.0.0.1".to_string(),
         port: 0,
         static_dir: None,
-        data_dir: "/tmp/kolosal-test-data2".to_string(),
-        models_dir: "/tmp/kolosal-test-models2".to_string(),
+        data_dir: "/tmp/automl-test-data2".to_string(),
+        models_dir: "/tmp/automl-test-models2".to_string(),
         max_upload_size: 10 * 1024 * 1024,
     };
     std::fs::create_dir_all(&config.data_dir).ok();
@@ -428,8 +428,8 @@ async fn test_auto_clean_after_sample_load() {
         host: "127.0.0.1".to_string(),
         port: 0,
         static_dir: None,
-        data_dir: "/tmp/kolosal-test-clean".to_string(),
-        models_dir: "/tmp/kolosal-test-clean-models".to_string(),
+        data_dir: "/tmp/automl-test-clean".to_string(),
+        models_dir: "/tmp/automl-test-clean-models".to_string(),
         max_upload_size: 10 * 1024 * 1024,
     };
     std::fs::create_dir_all(&config.data_dir).ok();
@@ -868,8 +868,8 @@ async fn test_model_structure_missing_model() {
 
 #[test]
 fn test_insights_evaluation_struct_exists() {
-    use kolosal_automl::server::state::InsightsEvaluation;
-    use kolosal_automl::training::TaskType;
+    use automl::server::state::InsightsEvaluation;
+    use automl::training::TaskType;
     let eval = InsightsEvaluation {
         task: TaskType::BinaryClassification,
         classes: vec!["a".to_string(), "b".to_string()],

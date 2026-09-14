@@ -1,6 +1,6 @@
 //! Voting ensemble methods
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::training::Model;
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
@@ -52,7 +52,7 @@ impl VotingClassifier {
         x: &Array2<f64>,
     ) -> Result<Array1<f64>> {
         if models.is_empty() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "No models provided".to_string(),
             ));
         }
@@ -92,7 +92,7 @@ impl VotingClassifier {
         weights: Option<&[f64]>,
     ) -> Result<Array1<f64>> {
         if predictions.is_empty() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "No predictions provided".to_string(),
             ));
         }
@@ -171,7 +171,7 @@ impl VotingClassifier {
         weights: Option<&[f64]>,
     ) -> Result<Array1<f64>> {
         if predictions.is_empty() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "No predictions provided".to_string(),
             ));
         }
@@ -255,7 +255,7 @@ impl VotingRegressor {
         x: &Array2<f64>,
     ) -> Result<Array1<f64>> {
         if models.is_empty() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "No models provided".to_string(),
             ));
         }
@@ -274,7 +274,7 @@ impl VotingRegressor {
         weights: Option<&[f64]>,
     ) -> Result<Array1<f64>> {
         if predictions.is_empty() {
-            return Err(KolosalError::ValidationError(
+            return Err(AutoMLError::ValidationError(
                 "No predictions provided".to_string(),
             ));
         }

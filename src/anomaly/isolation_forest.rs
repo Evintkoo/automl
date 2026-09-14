@@ -1,6 +1,6 @@
 //! Isolation Forest anomaly detection
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::anomaly::AnomalyDetector;
 use ndarray::{Array1, Array2};
 use rand::prelude::*;
@@ -180,7 +180,7 @@ impl IsolationForest {
     /// Score is between 0 and 1, higher means more anomalous
     fn compute_scores(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         let trees = self.trees.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Model not fitted".to_string())
+            AutoMLError::ValidationError("Model not fitted".to_string())
         })?;
 
         let n_samples_fit = self.n_samples.unwrap_or(256);

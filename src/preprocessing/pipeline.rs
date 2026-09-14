@@ -1,6 +1,6 @@
 //! Data preprocessing pipeline
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use super::{
     config::PreprocessingConfig,
     imputer::{Imputer, ImputeStrategy},
@@ -151,7 +151,7 @@ impl DataPreprocessor {
             }
         }
         let all_cols: Vec<Column> = ordered.into_iter().flatten().collect();
-        DataFrame::new(all_cols).map_err(|e| KolosalError::DataError(e.to_string()))
+        DataFrame::new(all_cols).map_err(|e| AutoMLError::DataError(e.to_string()))
     }
 
     pub fn fit(&mut self, df: &DataFrame) -> Result<&mut Self> {
@@ -227,7 +227,7 @@ impl DataPreprocessor {
         let start = Instant::now();
 
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         // Cast numeric columns to Float64

@@ -160,7 +160,7 @@ pub async fn upload_data(
         validate_dataset_size(&df)?;
 
         // Store dataset with sanitized path
-        let temp_path = std::env::temp_dir().join(format!("kolosal_{}", &file_name));
+        let temp_path = std::env::temp_dir().join(format!("automl_{}", &file_name));
         let dataset_id = state.store_dataset(file_name.clone(), df.clone(), temp_path).await;
 
         let column_names: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
@@ -1620,8 +1620,8 @@ pub async fn health_check() -> Json<serde_json::Value> {
 pub async fn serve_index() -> impl IntoResponse {
     // Try multiple paths to find index.html
     let mut paths = vec![
-        "kolosal-web/static/index.html".to_string(),
-        format!("{}/kolosal-web/static/index.html", env!("CARGO_MANIFEST_DIR")),
+        "automl-web/static/index.html".to_string(),
+        format!("{}/automl-web/static/index.html", env!("CARGO_MANIFEST_DIR")),
     ];
 
     // Also check STATIC_DIR env var
@@ -1649,7 +1649,7 @@ const EMBEDDED_INDEX_HTML: &str = r#"<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kolosal AutoML</title>
+    <title>AutoML</title>
     <link rel="stylesheet" href="/static/remixicon.css">
     <style>
         @font-face{font-family:"remixicon";src:url("/static/remixicon.woff2") format("woff2");font-display:swap}
@@ -1851,7 +1851,7 @@ const EMBEDDED_INDEX_HTML: &str = r#"<!DOCTYPE html>
         <aside class="sidebar" id="e-sidebar">
             <div class="sidebar-header">
                 <div class="sidebar-logo">K</div>
-                <div class="sidebar-title">Kolosal AutoML</div>
+                <div class="sidebar-title">AutoML</div>
             </div>
             <nav class="sidebar-nav">
                 <div class="sidebar-section">Overview</div>
@@ -5212,7 +5212,7 @@ pub async fn get_monitoring_dashboard() -> Html<String> {
     let mem_usage = (sys.used_memory() as f64 / sys.total_memory().max(1) as f64) * 100.0;
 
     let html = format!(r#"<!DOCTYPE html>
-<html><head><title>Kolosal AutoML - Monitoring</title>
+<html><head><title>AutoML - Monitoring</title>
 <style>
 body {{ font-family: sans-serif; margin: 2em; background: #f5f5f5; }}
 .card {{ background: white; border-radius: 8px; padding: 1.5em; margin: 1em 0; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
@@ -5220,7 +5220,7 @@ h1 {{ color: #333; }} h2 {{ color: #555; margin-top: 0; }}
 .metric {{ font-size: 2em; font-weight: bold; color: #2563eb; }}
 .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1em; }}
 </style></head><body>
-<h1>Kolosal AutoML Monitoring</h1>
+<h1>AutoML Monitoring</h1>
 <div class="grid">
   <div class="card"><h2>CPU Usage</h2><div class="metric">{:.1}%</div></div>
   <div class="card"><h2>Memory Usage</h2><div class="metric">{:.1}%</div></div>
@@ -6583,7 +6583,7 @@ pub async fn import_from_url(
     let cols = df.width();
 
     let safe_filename = sanitize_filename(&filename);
-    let temp_path = std::env::temp_dir().join(format!("kolosal_{}", &safe_filename));
+    let temp_path = std::env::temp_dir().join(format!("automl_{}", &safe_filename));
     let dataset_id = state.store_dataset(safe_filename.clone(), df, temp_path).await;
 
     info!(dataset_id = %dataset_id, rows, cols, "URL import successful");
@@ -7142,7 +7142,7 @@ pub async fn run_automl_pipeline(
                         }),
                         TaskType::Clustering => serde_json::json!({}),
                     };
-                    Ok::<_, crate::error::KolosalError>((result_json, engine))
+                    Ok::<_, crate::error::AutoMLError>((result_json, engine))
                 }).await;
 
                 let model_time = model_start.elapsed();
@@ -7537,7 +7537,7 @@ pub async fn apply_best_params(
                 }),
             };
 
-            Ok::<(serde_json::Value, TrainEngine), crate::error::KolosalError>((result, engine))
+            Ok::<(serde_json::Value, TrainEngine), crate::error::AutoMLError>((result, engine))
         }).await;
 
         match result {

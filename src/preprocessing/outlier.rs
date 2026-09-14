@@ -2,7 +2,7 @@
 //!
 //! Provides methods to detect and handle outliers in numeric data.
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -127,7 +127,7 @@ impl OutlierDetector {
         for col_name in &columns {
             let series = df
                 .column(col_name.as_str())
-                .map_err(|_| KolosalError::FeatureNotFound(col_name.clone()))?;
+                .map_err(|_| AutoMLError::FeatureNotFound(col_name.clone()))?;
 
             if let Ok(ca) = series.f64() {
                 let bounds = self.compute_bounds(&ca)?;
@@ -142,7 +142,7 @@ impl OutlierDetector {
     /// Transform the data by handling outliers
     pub fn transform(&self, df: &DataFrame) -> Result<DataFrame> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         if matches!(self.strategy, OutlierStrategy::None) {
@@ -156,10 +156,10 @@ impl OutlierDetector {
                 let transformed = self.transform_column(&series.as_series().unwrap(), bounds)?;
                 result = result
                     .drop(col_name.as_str())
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?;
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?;
                 result
                     .hstack_mut(&[transformed.into()])
-                    .map_err(|e| KolosalError::DataError(e.to_string()))?;
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?;
             }
         }
 
@@ -175,7 +175,7 @@ impl OutlierDetector {
     /// Detect outliers and return a boolean mask
     pub fn detect(&self, df: &DataFrame) -> Result<DataFrame> {
         if !self.is_fitted {
-            return Err(KolosalError::ModelNotFitted);
+            return Err(AutoMLError::ModelNotFitted);
         }
 
         let mut masks: Vec<Column> = Vec::new();
@@ -187,7 +187,7 @@ impl OutlierDetector {
             }
         }
 
-        DataFrame::new(masks).map_err(|e| KolosalError::DataError(e.to_string()))
+        DataFrame::new(masks).map_err(|e| AutoMLError::DataError(e.to_string()))
     }
 
     /// Get the computed bounds
@@ -257,7 +257,7 @@ impl OutlierDetector {
     fn transform_column(&self, series: &Series, bounds: &OutlierBounds) -> Result<Series> {
         let ca = series
             .f64()
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         let transformed: Vec<Option<f64>> = ca
             .into_iter()
@@ -284,7 +284,7 @@ impl OutlierDetector {
     fn detect_in_column(&self, series: &Series, bounds: &OutlierBounds) -> Result<Vec<bool>> {
         let ca = series
             .f64()
-            .map_err(|e| KolosalError::DataError(e.to_string()))?;
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
         let mask: Vec<bool> = ca
             .into_iter()

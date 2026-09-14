@@ -5,7 +5,7 @@
 //! - Gradient-based One-Side Sampling (GOSS): keeps top gradients, samples low gradients
 //! - Typically faster training with better accuracy on large datasets
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use ndarray::{Array1, Array2};
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
@@ -295,7 +295,7 @@ impl LightGBMRegressor {
 
     pub fn fit(&mut self, x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
         let n = x.nrows();
-        if n == 0 { return Err(KolosalError::TrainingError("Empty dataset".into())); }
+        if n == 0 { return Err(AutoMLError::TrainingError("Empty dataset".into())); }
 
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(self.config.random_state.unwrap_or(42));
         self.base_prediction = y.mean().unwrap_or(0.0);
@@ -380,7 +380,7 @@ impl LightGBMClassifier {
 
     pub fn fit(&mut self, x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
         let n = x.nrows();
-        if n == 0 { return Err(KolosalError::TrainingError("Empty dataset".into())); }
+        if n == 0 { return Err(AutoMLError::TrainingError("Empty dataset".into())); }
 
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(self.config.random_state.unwrap_or(42));
         let pos = y.iter().filter(|&&v| v > 0.5).count() as f64;

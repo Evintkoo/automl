@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use super::priority::{Priority, PriorityQueue};
 
 /// Configuration for batch processor
@@ -164,11 +164,11 @@ impl<T: Send + 'static> BatchProcessor<T> {
     /// Enqueue an item with the given priority
     pub fn enqueue(&self, item: T, priority: Priority) -> Result<()> {
         let mut queue = self.queue.lock().map_err(|_| {
-            KolosalError::ProcessingError("Failed to acquire queue lock".to_string())
+            AutoMLError::ProcessingError("Failed to acquire queue lock".to_string())
         })?;
         
         if queue.is_full() {
-            return Err(KolosalError::ProcessingError("Queue is full".to_string()));
+            return Err(AutoMLError::ProcessingError("Queue is full".to_string()));
         }
         
         queue.push(item, priority);

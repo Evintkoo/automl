@@ -1,6 +1,6 @@
 //! Statistical anomaly detection methods
 
-use crate::error::{KolosalError, Result};
+use crate::error::{AutoMLError, Result};
 use crate::anomaly::AnomalyDetector;
 use ndarray::{Array1, Array2, Axis};
 use serde::{Deserialize, Serialize};
@@ -58,10 +58,10 @@ impl AnomalyDetector for ZScoreDetector {
 
     fn score_samples(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         let means = self.means.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Model not fitted".to_string())
+            AutoMLError::ValidationError("Model not fitted".to_string())
         })?;
         let stds = self.stds.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Model not fitted".to_string())
+            AutoMLError::ValidationError("Model not fitted".to_string())
         })?;
 
         let scores: Vec<f64> = x
@@ -170,7 +170,7 @@ impl EllipticEnvelope {
                 
                 if i == j {
                     if sum <= 0.0 {
-                        return Err(KolosalError::ValidationError(
+                        return Err(AutoMLError::ValidationError(
                             "Covariance matrix is not positive definite".to_string()
                         ));
                     }
@@ -223,7 +223,7 @@ impl AnomalyDetector for EllipticEnvelope {
 
         // Compute mean
         let mean: Array1<f64> = x.mean_axis(Axis(0)).ok_or_else(|| {
-            KolosalError::ValidationError("Failed to compute mean".to_string())
+            AutoMLError::ValidationError("Failed to compute mean".to_string())
         })?;
 
         // Compute covariance matrix
@@ -261,7 +261,7 @@ impl AnomalyDetector for EllipticEnvelope {
 
     fn score_samples(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         if self.mean.is_none() {
-            return Err(KolosalError::ValidationError("Model not fitted".to_string()));
+            return Err(AutoMLError::ValidationError("Model not fitted".to_string()));
         }
 
         let scores: Vec<f64> = x
@@ -366,10 +366,10 @@ impl AnomalyDetector for StatisticalDetector {
 
     fn score_samples(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         let lower = self.lower_bounds.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Model not fitted".to_string())
+            AutoMLError::ValidationError("Model not fitted".to_string())
         })?;
         let upper = self.upper_bounds.as_ref().ok_or_else(|| {
-            KolosalError::ValidationError("Model not fitted".to_string())
+            AutoMLError::ValidationError("Model not fitted".to_string())
         })?;
 
         let scores: Vec<f64> = x

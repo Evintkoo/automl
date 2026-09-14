@@ -216,7 +216,7 @@ fn transform_label(&self, df: &DataFrame) -> Result<DataFrame> {
     let mut new_cols: Vec<Series> = Vec::new();
     for (col_name, mapping) in &self.mappings {
         if let Ok(series) = df.column(col_name) {
-            let ca = series.str().map_err(|e| KolosalError::DataError(e.to_string()))?;
+            let ca = series.str().map_err(|e| AutoMLError::DataError(e.to_string()))?;
             let values: Vec<Option<i64>> = ca
                 .into_iter()
                 .map(|v| v.and_then(|s| mapping.get(s).map(|&i| i as i64)))
@@ -227,7 +227,7 @@ fn transform_label(&self, df: &DataFrame) -> Result<DataFrame> {
     // One clone + N in-place mutations — no clone after each with_column
     let mut result = df.clone();
     for col in new_cols {
-        result.with_column(col).map_err(|e| KolosalError::DataError(e.to_string()))?;
+        result.with_column(col).map_err(|e| AutoMLError::DataError(e.to_string()))?;
     }
     Ok(result)
 }
@@ -242,7 +242,7 @@ fn transform_target(&self, df: &DataFrame) -> Result<DataFrame> {
     let mut new_cols: Vec<Series> = Vec::new();
     for (col_name, means) in &self.target_means {
         if let Ok(series) = df.column(col_name) {
-            let ca = series.str().map_err(|e| KolosalError::DataError(e.to_string()))?;
+            let ca = series.str().map_err(|e| AutoMLError::DataError(e.to_string()))?;
             let global_mean: f64 = means.values().sum::<f64>() / means.len().max(1) as f64;
             let values: Vec<f64> = ca
                 .into_iter()
@@ -253,7 +253,7 @@ fn transform_target(&self, df: &DataFrame) -> Result<DataFrame> {
     }
     let mut result = df.clone();
     for col in new_cols {
-        result.with_column(col).map_err(|e| KolosalError::DataError(e.to_string()))?;
+        result.with_column(col).map_err(|e| AutoMLError::DataError(e.to_string()))?;
     }
     Ok(result)
 }
@@ -270,7 +270,7 @@ fn transform_binary(&self, df: &DataFrame) -> Result<DataFrame> {
 
     for (col_name, mapping) in &self.mappings {
         if let Ok(series) = df.column(col_name) {
-            let ca = series.str().map_err(|e| KolosalError::DataError(e.to_string()))?;
+            let ca = series.str().map_err(|e| AutoMLError::DataError(e.to_string()))?;
             let n_categories = mapping.len();
             if n_categories == 0 {
                 cols_to_drop.push(col_name.clone());
@@ -298,12 +298,12 @@ fn transform_binary(&self, df: &DataFrame) -> Result<DataFrame> {
     // Build result: one clone + drop originals + add all new columns
     let mut result = df.clone();
     for col_name in &cols_to_drop {
-        result = result.drop(col_name).map_err(|e| KolosalError::DataError(e.to_string()))?;
+        result = result.drop(col_name).map_err(|e| AutoMLError::DataError(e.to_string()))?;
     }
     // Build final DataFrame with new columns appended
     let mut all_cols: Vec<Series> = result.get_columns().iter().map(|c| c.as_materialized_series().clone()).collect();
     all_cols.extend(extra_cols);
-    DataFrame::new(all_cols).map_err(|e| KolosalError::DataError(e.to_string()))
+    DataFrame::new(all_cols).map_err(|e| AutoMLError::DataError(e.to_string()))
 }
 ```
 
@@ -316,7 +316,7 @@ fn transform_hash(&self, df: &DataFrame, n_components: usize) -> Result<DataFram
 
     for col_name in self.mappings.keys() {
         if let Ok(series) = df.column(col_name) {
-            let ca = series.str().map_err(|e| KolosalError::DataError(e.to_string()))?;
+            let ca = series.str().map_err(|e| AutoMLError::DataError(e.to_string()))?;
 
             // Row-outer, component-inner: each row read once for all components
             let mut component_values: Vec<Vec<f64>> = vec![Vec::with_capacity(ca.len()); n_components];
@@ -341,11 +341,11 @@ fn transform_hash(&self, df: &DataFrame, n_components: usize) -> Result<DataFram
 
     let mut result = df.clone();
     for col_name in &cols_to_drop {
-        result = result.drop(col_name).map_err(|e| KolosalError::DataError(e.to_string()))?;
+        result = result.drop(col_name).map_err(|e| AutoMLError::DataError(e.to_string()))?;
     }
     let mut all_cols: Vec<Series> = result.get_columns().iter().map(|c| c.as_materialized_series().clone()).collect();
     all_cols.extend(extra_cols);
-    DataFrame::new(all_cols).map_err(|e| KolosalError::DataError(e.to_string()))
+    DataFrame::new(all_cols).map_err(|e| AutoMLError::DataError(e.to_string()))
 }
 ```
 
@@ -360,7 +360,7 @@ fn transform_frequency(&self, df: &DataFrame) -> Result<DataFrame> {
     let new_cols: Vec<Result<Series>> = self.mappings.par_iter()
         .filter_map(|(col_name, _mapping)| {
             df.column(col_name).ok().map(|series| {
-                let ca = series.str().map_err(|e| KolosalError::DataError(e.to_string()))?;
+                let ca = series.str().map_err(|e| AutoMLError::DataError(e.to_string()))?;
                 let total = ca.len() as f64;
                 // Collect values once to allow two-pass logic safely
                 let raw_vals: Vec<Option<String>> = ca.into_iter()
@@ -382,7 +382,7 @@ fn transform_frequency(&self, df: &DataFrame) -> Result<DataFrame> {
     let new_cols: Vec<Series> = new_cols.into_iter().collect::<Result<Vec<_>>>()?;
     let mut result = df.clone();
     for col in new_cols {
-        result.with_column(col).map_err(|e| KolosalError::DataError(e.to_string()))?;
+        result.with_column(col).map_err(|e| AutoMLError::DataError(e.to_string()))?;
     }
     Ok(result)
 }
@@ -425,7 +425,7 @@ Run: `sed -n '103,207p' src/preprocessing/scaler.rs`
 ```rust
 pub fn transform(&self, df: &DataFrame) -> Result<DataFrame> {
     if !self.is_fitted {
-        return Err(KolosalError::ModelNotFitted);
+        return Err(AutoMLError::ModelNotFitted);
     }
 
     // Parallel: scale all columns independently
@@ -455,7 +455,7 @@ pub fn transform(&self, df: &DataFrame) -> Result<DataFrame> {
         .map(|(i, &s)| (s, i))
         .collect();
     all_cols.sort_by_key(|c| pos.get(c.name().as_str()).copied().unwrap_or(usize::MAX));
-    DataFrame::new(all_cols).map_err(|e| KolosalError::DataError(e.to_string()))
+    DataFrame::new(all_cols).map_err(|e| AutoMLError::DataError(e.to_string()))
 }
 ```
 
@@ -464,7 +464,7 @@ Also replace `inverse_transform()` (lines 136–157) with the same build-without
 ```rust
 pub fn inverse_transform(&self, df: &DataFrame) -> Result<DataFrame> {
     if !self.is_fitted {
-        return Err(KolosalError::ModelNotFitted);
+        return Err(AutoMLError::ModelNotFitted);
     }
 
     // Parallel: unscale all columns independently
@@ -493,7 +493,7 @@ pub fn inverse_transform(&self, df: &DataFrame) -> Result<DataFrame> {
         .map(|(i, &s)| (s, i))
         .collect();
     all_cols.sort_by_key(|c| pos.get(c.name().as_str()).copied().unwrap_or(usize::MAX));
-    DataFrame::new(all_cols).map_err(|e| KolosalError::DataError(e.to_string()))
+    DataFrame::new(all_cols).map_err(|e| AutoMLError::DataError(e.to_string()))
 }
 ```
 
@@ -628,7 +628,7 @@ for col in columns_to_cast {
     }
 }
 let all_cols: Vec<Column> = ordered.into_iter().flatten().collect();
-DataFrame::new(all_cols).map_err(|e| KolosalError::DataError(e.to_string()))
+DataFrame::new(all_cols).map_err(|e| AutoMLError::DataError(e.to_string()))
 ```
 
 - [ ] **Step 4: Read `compute_statistics()` before editing**
@@ -722,7 +722,7 @@ fn transform(&self, x: &Array2<f64>) -> Result<Array2<f64>> {
     use rayon::prelude::*;
 
     let crossings = self.crossings.as_ref().ok_or_else(|| {
-        KolosalError::ValidationError("Transformer not fitted".to_string())
+        AutoMLError::ValidationError("Transformer not fitted".to_string())
     })?;
 
     let n_original = if self.include_original { x.ncols() } else { 0 };

@@ -12,7 +12,7 @@
 //!
 //! # Example
 //! ```
-//! use kolosal_automl::adaptive::{AdaptivePreprocessorConfig, DatasetCharacteristics, ProcessingMode};
+//! use automl::adaptive::{AdaptivePreprocessorConfig, DatasetCharacteristics, ProcessingMode};
 //!
 //! let chars = DatasetCharacteristics {
 //!     n_rows: 100_000,
@@ -27,7 +27,7 @@
 //!     outlier_ratio: 0.02,
 //!     high_cardinality_count: 0,
 //!     memory_mb: 500.0,
-//!     dataset_size: kolosal_automl::adaptive::DatasetSize::Large,
+//!     dataset_size: automl::adaptive::DatasetSize::Large,
 //! };
 //! let mode = AdaptivePreprocessorConfig::determine_strategy(&chars);
 //! ```

@@ -1,10 +1,10 @@
 # ============================================================================
-# Kolosal AutoML - Docker Ignore
+# AutoML - Docker Ignore
 # ============================================================================
 # Keeps the build context small and fast. Only send what the build needs:
 #   - Cargo.toml, Cargo.lock (dependency resolution)
 #   - src/ (Rust source code)
-#   - kolosal-web/ (static web UI assets)
+#   - automl-web/ (static web UI assets)
 # ============================================================================
 
 # --- Rust build artifacts (huge, rebuild inside container) ---

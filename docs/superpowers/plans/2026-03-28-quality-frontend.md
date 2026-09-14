@@ -57,7 +57,7 @@ fn test_report_gate_scores_populated() {
 - [ ] **Step 2: Run the test to verify it fails**
 
 ```bash
-cargo test -p kolosal_automl test_report_gate_scores_populated 2>&1 | tail -20
+cargo test -p automl test_report_gate_scores_populated 2>&1 | tail -20
 ```
 
 Expected: compile error — `gate_scores` field does not exist on `QualityReport`.
@@ -118,7 +118,7 @@ QualityReport {
 - [ ] **Step 6: Run all quality tests**
 
 ```bash
-cargo test -p kolosal_automl quality 2>&1 | tail -30
+cargo test -p automl quality 2>&1 | tail -30
 ```
 
 Expected: all tests pass including `test_report_gate_scores_populated`.
@@ -448,7 +448,7 @@ Expected: no errors.
 - [ ] **Step 7: Run quality tests to confirm no regressions**
 
 ```bash
-cargo test -p kolosal_automl quality 2>&1 | tail -20
+cargo test -p automl quality 2>&1 | tail -20
 ```
 
 Expected: all tests pass.

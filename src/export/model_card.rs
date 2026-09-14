@@ -91,7 +91,7 @@ impl ModelCard {
                 version: "1.0.0".to_string(),
                 model_type: model_type.to_string(),
                 task_type: task_type.to_string(),
-                framework: format!("Kolosal AutoML v{}", env!("CARGO_PKG_VERSION")),
+                framework: format!("AutoML v{}", env!("CARGO_PKG_VERSION")),
                 hyperparameters,
                 training_date: Utc::now(),
             },
@@ -305,7 +305,7 @@ mod tests {
         let card = ModelCard::generate(
             "test", "RF", "classification", HashMap::new(), 0, 0, vec![], serde_json::json!({}),
         );
-        assert!(card.model_details.framework.starts_with("Kolosal AutoML v"));
+        assert!(card.model_details.framework.starts_with("AutoML v"));
     }
 
     #[test]

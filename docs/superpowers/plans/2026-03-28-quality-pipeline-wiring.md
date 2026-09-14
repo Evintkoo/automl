@@ -46,7 +46,7 @@ Change `fn extract_features` to `pub fn extract_features`:
 - [ ] **Step 3: Verify it compiles**
 
 ```bash
-cd /Users/evintleovonzko/Documents/Works/Kolosal/kolosal_automl
+cd /Users/evintleovonzko/Documents/Works/AutoML/automl
 cargo check 2>&1 | head -20
 ```
 Expected: no errors related to this change.
