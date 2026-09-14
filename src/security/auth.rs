@@ -270,7 +270,7 @@ impl SecurityManager {
         );
         headers.insert(
             "Content-Security-Policy".to_string(),
-            "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:".to_string(),
+            "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://cdn.plot.ly; img-src 'self' data:; font-src 'self' data:".to_string(),
         );
         headers.insert(
             "Referrer-Policy".to_string(),
