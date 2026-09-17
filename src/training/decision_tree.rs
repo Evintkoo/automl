@@ -2,6 +2,9 @@
 
 use crate::error::{AutoMLError, Result};
 use ndarray::{Array1, Array2};
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -64,6 +67,15 @@ pub struct DecisionTree {
     /// Mapping from class label (as i64) to contiguous index — built once in fit()
     #[serde(default)]
     class_to_idx: HashMap<i64, usize>,
+    /// Seed used to drive random feature subsampling when `max_features` < total features
+    /// (e.g. when used as a base learner inside a Random Forest). Defaults to a fixed value
+    /// for reproducibility when not explicitly set via `with_seed`.
+    #[serde(default = "default_seed")]
+    pub seed: u64,
+}
+
+fn default_seed() -> u64 {
+    42
 }
 
 impl Default for DecisionTree {
@@ -131,6 +143,7 @@ impl DecisionTree {
             is_classification: true,
             classes: Vec::new(),
             class_to_idx: HashMap::new(),
+            seed: default_seed(),
         }
     }
 
@@ -148,7 +161,15 @@ impl DecisionTree {
             is_classification: false,
             classes: Vec::new(),
             class_to_idx: HashMap::new(),
+            seed: default_seed(),
         }
+    }
+
+    /// Set the RNG seed used for random feature subsampling at each split
+    /// (only relevant when `max_features` is set to less than the total feature count).
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
     }
 
     /// Set maximum depth
@@ -211,9 +232,12 @@ impl DecisionTree {
         // Initialize feature importances
         let mut importances = vec![0.0; n_features];
 
-        // Build tree recursively
+        // Build tree recursively. A dedicated RNG (seeded for reproducibility) drives
+        // per-split random feature subsampling when `max_features` restricts the search
+        // (e.g. Random Forest base learners) — see `find_best_split`.
         let indices: Vec<usize> = (0..n_samples).collect();
-        self.root = Some(self.build_tree(x, y, &indices, 0, &mut importances));
+        let mut rng = ChaCha8Rng::seed_from_u64(self.seed);
+        self.root = Some(self.build_tree(x, y, &indices, 0, &mut importances, &mut rng));
 
         // Normalize feature importances
         let total: f64 = importances.iter().sum();
@@ -234,6 +258,7 @@ impl DecisionTree {
         indices: &[usize],
         depth: usize,
         importances: &mut [f64],
+        rng: &mut ChaCha8Rng,
     ) -> TreeNode {
         let n_samples = indices.len();
         let y_subset: Vec<f64> = indices.iter().map(|&i| y[i]).collect();
@@ -252,7 +277,7 @@ impl DecisionTree {
         }
 
         // Find best split
-        if let Some((best_feature, best_threshold, best_impurity, parent_imp, weighted_child_imp)) = self.find_best_split(x, y, indices) {
+        if let Some((best_feature, best_threshold, best_impurity, parent_imp, weighted_child_imp)) = self.find_best_split(x, y, indices, rng) {
             // Split indices
             let (left_indices, right_indices): (Vec<usize>, Vec<usize>) = indices
                 .iter()
@@ -268,9 +293,10 @@ impl DecisionTree {
             // Update feature importance
             importances[best_feature] += n_samples as f64 * (parent_imp - weighted_child_imp);
 
-            // Build children recursively
-            let left = Box::new(self.build_tree(x, y, &left_indices, depth + 1, importances));
-            let right = Box::new(self.build_tree(x, y, &right_indices, depth + 1, importances));
+            // Build children recursively (sequential, so the single RNG can be threaded
+            // through both subtrees without aliasing issues)
+            let left = Box::new(self.build_tree(x, y, &left_indices, depth + 1, importances, rng));
+            let right = Box::new(self.build_tree(x, y, &right_indices, depth + 1, importances, rng));
 
             TreeNode::Split {
                 feature_idx: best_feature,
@@ -288,11 +314,32 @@ impl DecisionTree {
         }
     }
 
-    fn find_best_split(&self, x: &Array2<f64>, y: &Array1<f64>, indices: &[usize]) -> Option<(usize, f64, f64, f64, f64)> {
+    fn find_best_split(
+        &self,
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        indices: &[usize],
+        rng: &mut ChaCha8Rng,
+    ) -> Option<(usize, f64, f64, f64, f64)> {
         let n_features = x.ncols();
         let max_features = self.max_features.unwrap_or(n_features);
         let n_features_to_try = max_features.min(n_features);
         let n_classes = self.classes.len();
+
+        // Randomly draw the subset of feature indices to evaluate at THIS split, rather than
+        // always taking the first `n_features_to_try` columns in order. This is what makes
+        // `max_features` actually decorrelate trees in a Random Forest — evaluating a fixed
+        // leading slice would mean every tree considers the same features in the same order,
+        // completely defeating the subsampling. A fresh subset is drawn per split (matching
+        // standard Random Forest behavior, e.g. scikit-learn), not just once per tree.
+        let candidate_features: Vec<usize> = if n_features_to_try < n_features {
+            let mut all_features: Vec<usize> = (0..n_features).collect();
+            all_features.shuffle(rng);
+            all_features.truncate(n_features_to_try);
+            all_features
+        } else {
+            (0..n_features).collect()
+        };
 
         // Pre-compute total statistics once
         let total_count = indices.len();
@@ -318,8 +365,8 @@ impl DecisionTree {
         let is_classification = self.is_classification;
         let class_to_idx = &self.class_to_idx;
 
-        // Parallelize feature scanning — each feature independently finds its best split
-        let feature_results: Vec<Option<(usize, f64, f64, f64, f64)>> = (0..n_features_to_try)
+        // Parallelize feature scanning — each candidate feature independently finds its best split
+        let feature_results: Vec<Option<(usize, f64, f64, f64, f64)>> = candidate_features
             .into_par_iter()
             .map(|feature_idx| {
                 // Sort indices by feature value once — O(N log N)

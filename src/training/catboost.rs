@@ -43,12 +43,21 @@ struct SymmetricTree {
 }
 
 impl SymmetricTree {
-    fn predict(&self, sample: &[f64]) -> f64 {
+    /// The leaf index a sample routes to, clamped to a valid `leaf_values` index.
+    /// Factored out of `predict` so the ordered-boosting update pass (see
+    /// `CatBoostRegressor::fit`/`CatBoostClassifier::fit`) can look up which leaf a row
+    /// belongs to without going through `leaf_values` — it needs the index itself to
+    /// maintain per-leaf running gradient/hessian sums.
+    fn leaf_index(&self, sample: &[f64]) -> usize {
         let mut idx = 0usize;
         for &(feature, threshold) in &self.splits {
             idx = idx * 2 + if sample[feature] > threshold { 1 } else { 0 };
         }
-        self.leaf_values[idx.min(self.leaf_values.len() - 1)]
+        idx.min(self.leaf_values.len().saturating_sub(1))
+    }
+
+    fn predict(&self, sample: &[f64]) -> f64 {
+        self.leaf_values[self.leaf_index(sample)]
     }
 }
 
@@ -162,24 +171,36 @@ impl CatBoostRegressor {
 
         let mut rng = Xoshiro256PlusPlus::seed_from_u64(self.config.random_state.unwrap_or(42));
         self.base_prediction = y.mean().unwrap_or(0.0);
-        let mut predictions = Array1::from_elem(n, self.base_prediction);
 
-        // Ordered boosting: random permutation to prevent target leakage
-        let mut perm: Vec<usize> = (0..n).collect();
-        perm.shuffle(&mut rng);
+        // `ordered_preds[i]` is the leak-free "ordered boosting" prediction used to compute
+        // row i's gradient at each round. Unlike a single shared running-prediction array
+        // (the previous, leaky implementation), each round's update to `ordered_preds[i]`
+        // only ever uses leaf statistics accumulated from rows that precede i in that
+        // round's permutation — never row i's own target, and never a row positioned after
+        // it. That is the actual leakage-prevention mechanism ordered boosting provides; see
+        // the per-round loop below.
+        let mut ordered_preds = Array1::from_elem(n, self.base_prediction);
 
         for _ in 0..self.config.n_estimators {
-            let gradients: Vec<f64> = predictions.iter().zip(y.iter()).map(|(&p, &yi)| p - yi).collect();
+            // Gradients from the ordered (leak-free) predictions — NOT a standard shared
+            // running array, which by this point would already be influenced by every row's
+            // own contribution to fitting earlier trees (the "prediction shift" problem
+            // ordered boosting exists to avoid).
+            let gradients: Vec<f64> = ordered_preds.iter().zip(y.iter()).map(|(&p, &yi)| p - yi).collect();
             let hessians: Vec<f64> = vec![1.0; n];
 
+            // A fresh permutation each round drives both the ordered-update pass below and
+            // (when `subsample < 1.0`) the row subsample used to fit this round's tree
+            // structure — a prefix of an already-shuffled permutation is a fair random
+            // sample, so no separate shuffle/truncate is needed.
+            let mut perm: Vec<usize> = (0..n).collect();
+            perm.shuffle(&mut rng);
+
             let indices: Vec<usize> = if self.config.subsample < 1.0 {
-                let k = (n as f64 * self.config.subsample).ceil() as usize;
-                let mut sub = perm.clone();
-                sub.shuffle(&mut rng);
-                sub.truncate(k);
-                sub
+                let k = ((n as f64) * self.config.subsample).ceil() as usize;
+                perm[..k.min(n)].to_vec()
             } else {
-                (0..n).collect()
+                perm.clone()
             };
 
             let tree = build_symmetric_tree(
@@ -187,9 +208,32 @@ impl CatBoostRegressor {
                 self.config.max_depth, self.config.reg_lambda, &mut rng,
             );
 
-            for i in 0..n {
-                predictions[i] += self.config.learning_rate * tree.predict(x.row(i).as_slice().unwrap());
+            // Ordered update: walk the permutation once, maintaining running per-leaf
+            // gradient/hessian sums. The row at permutation position p is updated using
+            // ONLY the leaf stats accumulated from rows at positions < p; its own (and every
+            // later row's) gradient/hessian is folded into the running sums only AFTER its
+            // update is computed, so it can never influence the prediction used to fit on
+            // it. Applied to every row every round (not just the rows in `indices`) so
+            // `ordered_preds` stays complete and consistent — subsampling only controls
+            // which rows shape this round's tree STRUCTURE, not which rows get updated.
+            let n_leaves = tree.leaf_values.len().max(1);
+            let mut leaf_g = vec![0.0f64; n_leaves];
+            let mut leaf_h = vec![0.0f64; n_leaves];
+
+            for &i in &perm {
+                let row = x.row(i);
+                let s = row.as_slice().unwrap();
+                let leaf = tree.leaf_index(s).min(n_leaves - 1);
+
+                let g = leaf_g[leaf];
+                let h = leaf_h[leaf];
+                let contribution = if h > 0.0 { -g / (h + self.config.reg_lambda) } else { 0.0 };
+                ordered_preds[i] += self.config.learning_rate * contribution;
+
+                leaf_g[leaf] += gradients[i];
+                leaf_h[leaf] += hessians[i];
             }
+
             self.trees.push(tree);
         }
         Ok(())
@@ -246,24 +290,25 @@ impl CatBoostClassifier {
         let pos = y.iter().filter(|&&v| v > 0.5).count() as f64;
         let neg = n as f64 - pos;
         self.base_prediction = (pos / neg.max(1e-10)).ln();
-        let mut raw = Array1::from_elem(n, self.base_prediction);
 
-        let mut perm: Vec<usize> = (0..n).collect();
-        perm.shuffle(&mut rng);
+        // See the matching comment in `CatBoostRegressor::fit` — `ordered_preds` is the
+        // leak-free "ordered boosting" running log-odds prediction, updated each round using
+        // only rows that precede a given row in that round's random permutation.
+        let mut ordered_preds = Array1::from_elem(n, self.base_prediction);
 
         for _ in 0..self.config.n_estimators {
-            let probs: Vec<f64> = raw.iter().map(|&r| sigmoid(r)).collect();
+            let probs: Vec<f64> = ordered_preds.iter().map(|&r| sigmoid(r)).collect();
             let gradients: Vec<f64> = probs.iter().zip(y.iter()).map(|(&p, &yi)| p - yi).collect();
             let hessians: Vec<f64> = probs.iter().map(|&p| (p * (1.0 - p)).max(1e-16)).collect();
 
+            let mut perm: Vec<usize> = (0..n).collect();
+            perm.shuffle(&mut rng);
+
             let indices: Vec<usize> = if self.config.subsample < 1.0 {
-                let k = (n as f64 * self.config.subsample).ceil() as usize;
-                let mut sub = perm.clone();
-                sub.shuffle(&mut rng);
-                sub.truncate(k);
-                sub
+                let k = ((n as f64) * self.config.subsample).ceil() as usize;
+                perm[..k.min(n)].to_vec()
             } else {
-                (0..n).collect()
+                perm.clone()
             };
 
             let tree = build_symmetric_tree(
@@ -271,9 +316,25 @@ impl CatBoostClassifier {
                 self.config.max_depth, self.config.reg_lambda, &mut rng,
             );
 
-            for i in 0..n {
-                raw[i] += self.config.learning_rate * tree.predict(x.row(i).as_slice().unwrap());
+            // Ordered update — see the matching comment in `CatBoostRegressor::fit`.
+            let n_leaves = tree.leaf_values.len().max(1);
+            let mut leaf_g = vec![0.0f64; n_leaves];
+            let mut leaf_h = vec![0.0f64; n_leaves];
+
+            for &i in &perm {
+                let row = x.row(i);
+                let s = row.as_slice().unwrap();
+                let leaf = tree.leaf_index(s).min(n_leaves - 1);
+
+                let g = leaf_g[leaf];
+                let h = leaf_h[leaf];
+                let contribution = if h > 0.0 { -g / (h + self.config.reg_lambda) } else { 0.0 };
+                ordered_preds[i] += self.config.learning_rate * contribution;
+
+                leaf_g[leaf] += gradients[i];
+                leaf_h[leaf] += hessians[i];
             }
+
             self.trees.push(tree);
         }
         Ok(())

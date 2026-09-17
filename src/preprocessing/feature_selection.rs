@@ -393,6 +393,13 @@ impl FeatureSelector {
     // Fit percentile selection
     fn fit_percentile(&mut self, x: &Array2<f64>, y: &Array1<f64>, percentile: f64) -> Result<()> {
         let n_features = x.ncols();
+        if n_features == 0 {
+            // Guard against the `(n_features - 1) as f64` subtraction below
+            // underflowing (usize) when there are no columns to score.
+            self.feature_scores = Some(Vec::new());
+            self.selected_features = Some(Vec::new());
+            return Ok(());
+        }
         let mut scores = Vec::with_capacity(n_features);
 
         // Compute correlation-based scores

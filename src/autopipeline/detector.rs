@@ -79,7 +79,7 @@ impl DetectedSchema {
         self.columns
             .iter()
             .enumerate()
-            .filter(|(_, col)| col.n_missing > 0 && !self.drop_columns.contains(&col.n_unique))
+            .filter(|(i, col)| col.n_missing > 0 && !self.drop_columns.contains(i))
             .map(|(i, _)| i)
             .collect()
     }

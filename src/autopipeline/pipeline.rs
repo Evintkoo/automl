@@ -101,6 +101,7 @@ pub struct AutoPipeline {
     composer: PipelineComposer,
     fitted_preprocessor: Option<FittedPreprocessor>,
     blueprint: Option<PipelineBlueprint>,
+    detected_schema: Option<DetectedSchema>,
 }
 
 impl AutoPipeline {
@@ -117,6 +118,7 @@ impl AutoPipeline {
             composer: PipelineComposer::new(composer_config),
             fitted_preprocessor: None,
             blueprint: None,
+            detected_schema: None,
         }
     }
 
@@ -129,12 +131,13 @@ impl AutoPipeline {
     pub fn analyze(&mut self, x: &Array2<f64>, column_names: Option<&[String]>) -> Result<&PipelineBlueprint> {
         // Detect schema
         let schema = self.detector.detect_from_array(x, column_names)?;
-        
+
         // Compose pipeline
         let blueprint = self.composer.compose(&schema)?;
-        
+
+        self.detected_schema = Some(schema);
         self.blueprint = Some(blueprint);
-        
+
         Ok(self.blueprint.as_ref().unwrap())
     }
 
@@ -407,21 +410,10 @@ impl AutoPipeline {
     }
 
     /// Get the detected schema
+    ///
+    /// Returns `None` if `analyze()` has not been called yet.
     pub fn schema(&self) -> Option<DetectedSchema> {
-        self.blueprint.as_ref().map(|_| {
-            // Would need to store schema separately
-            DetectedSchema {
-                columns: vec![],
-                n_rows: 0,
-                n_cols: 0,
-                numeric_columns: vec![],
-                categorical_columns: vec![],
-                datetime_columns: vec![],
-                text_columns: vec![],
-                drop_columns: vec![],
-                quality_score: 0.0,
-            }
-        })
+        self.detected_schema.clone()
     }
 
     /// Get the blueprint

@@ -211,6 +211,9 @@ pub struct LineageSummary {
 pub struct ProvenanceTracker {
     /// All lineage records by dataset ID
     records: Arc<RwLock<HashMap<String, DataLineage>>>,
+    /// Lineage records superseded via `register_dataset_replace`, keyed by
+    /// dataset ID and preserved (oldest first) instead of being discarded.
+    archived_records: Arc<RwLock<HashMap<String, Vec<DataLineage>>>>,
     /// Maximum number of records to keep
     max_records: usize,
 }
@@ -220,11 +223,18 @@ impl ProvenanceTracker {
     pub fn new(max_records: usize) -> Self {
         Self {
             records: Arc::new(RwLock::new(HashMap::new())),
+            archived_records: Arc::new(RwLock::new(HashMap::new())),
             max_records,
         }
     }
 
-    /// Register a new dataset and return its lineage record
+    /// Register a new dataset and return its lineage record.
+    ///
+    /// Returns an error (rather than silently overwriting) if `dataset_id`
+    /// already has a registered lineage, since overwriting would discard
+    /// its transformation history. To intentionally re-register a dataset
+    /// id, use [`Self::register_dataset_replace`], which archives the
+    /// prior lineage instead of discarding it.
     pub fn register_dataset(
         &self,
         dataset_id: &str,
@@ -233,7 +243,37 @@ impl ProvenanceTracker {
         row_count: usize,
         columns: Vec<ColumnSchema>,
         raw_data_sample: &[u8],
-    ) -> DataLineage {
+    ) -> Result<DataLineage> {
+        self.register_dataset_impl(dataset_id, name, source, row_count, columns, raw_data_sample, false)
+    }
+
+    /// Intentionally (re-)register a dataset id, replacing any existing
+    /// lineage. Unlike the old silent-overwrite behavior, the prior lineage
+    /// (if any) is preserved — see [`Self::get_archived_lineages`] — rather
+    /// than being discarded.
+    pub fn register_dataset_replace(
+        &self,
+        dataset_id: &str,
+        name: &str,
+        source: DataSource,
+        row_count: usize,
+        columns: Vec<ColumnSchema>,
+        raw_data_sample: &[u8],
+    ) -> Result<DataLineage> {
+        self.register_dataset_impl(dataset_id, name, source, row_count, columns, raw_data_sample, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn register_dataset_impl(
+        &self,
+        dataset_id: &str,
+        name: &str,
+        source: DataSource,
+        row_count: usize,
+        columns: Vec<ColumnSchema>,
+        raw_data_sample: &[u8],
+        force: bool,
+    ) -> Result<DataLineage> {
         let schema = SchemaSnapshot {
             columns,
             captured_at: Utc::now(),
@@ -251,8 +291,30 @@ impl ProvenanceTracker {
         );
 
         let mut records = self.records.write();
-        // Evict oldest if at capacity
-        if records.len() >= self.max_records {
+
+        if let Some(existing) = records.get(dataset_id) {
+            if !force {
+                return Err(AutoMLError::ProvenanceError(format!(
+                    "Dataset '{}' already has a registered lineage; refusing to overwrite it \
+                     (this would discard its transformation history). Use \
+                     register_dataset_replace to intentionally re-register — the prior lineage \
+                     will be archived, not discarded.",
+                    dataset_id
+                )));
+            }
+            tracing::warn!(
+                dataset_id = %dataset_id,
+                "Replacing existing provenance record — previous lineage archived, not discarded"
+            );
+            self.archived_records
+                .write()
+                .entry(dataset_id.to_string())
+                .or_default()
+                .push(existing.clone());
+        }
+
+        // Evict oldest if at capacity (only relevant when registering a new id)
+        if !records.contains_key(dataset_id) && records.len() >= self.max_records {
             if let Some(oldest_key) = records.values()
                 .min_by_key(|v| v.ingested_at)
                 .map(|v| v.dataset_id.clone())
@@ -260,16 +322,16 @@ impl ProvenanceTracker {
                 records.remove(&oldest_key);
             }
         }
-        // Warn if overwriting an existing record (transformation history will be lost)
-        if records.contains_key(dataset_id) {
-            tracing::warn!(
-                dataset_id = %dataset_id,
-                "Overwriting existing provenance record — previous transformation history lost"
-            );
-        }
         records.insert(dataset_id.to_string(), lineage.clone());
 
-        lineage
+        Ok(lineage)
+    }
+
+    /// Get archived (superseded) lineage records for a dataset id, oldest
+    /// first. Empty unless [`Self::register_dataset_replace`] has been used
+    /// for this id.
+    pub fn get_archived_lineages(&self, dataset_id: &str) -> Vec<DataLineage> {
+        self.archived_records.read().get(dataset_id).cloned().unwrap_or_default()
     }
 
     /// Record a transformation for a dataset
@@ -365,7 +427,7 @@ mod tests {
             150,
             sample_columns(),
             b"sample data bytes",
-        );
+        ).unwrap();
 
         assert_eq!(lineage.dataset_id, "ds-001");
         assert_eq!(lineage.name, "test_data");
@@ -383,7 +445,7 @@ mod tests {
             100,
             sample_columns(),
             b"data",
-        );
+        ).unwrap();
 
         let record = TransformationRecord {
             step: "StandardScaler".to_string(),
@@ -418,7 +480,7 @@ mod tests {
             50,
             sample_columns(),
             b"csv data",
-        );
+        ).unwrap();
 
         let summaries = tracker.list_all();
         assert_eq!(summaries.len(), 1);
@@ -434,9 +496,9 @@ mod tests {
     #[test]
     fn test_max_records_eviction() {
         let tracker = ProvenanceTracker::new(2);
-        tracker.register_dataset("ds-1", "a", DataSource::Unknown, 10, vec![], b"1");
-        tracker.register_dataset("ds-2", "b", DataSource::Unknown, 20, vec![], b"2");
-        tracker.register_dataset("ds-3", "c", DataSource::Unknown, 30, vec![], b"3");
+        tracker.register_dataset("ds-1", "a", DataSource::Unknown, 10, vec![], b"1").unwrap();
+        tracker.register_dataset("ds-2", "b", DataSource::Unknown, 20, vec![], b"2").unwrap();
+        tracker.register_dataset("ds-3", "c", DataSource::Unknown, 30, vec![], b"3").unwrap();
 
         assert_eq!(tracker.count(), 2);
     }
@@ -489,7 +551,7 @@ mod tests {
     #[test]
     fn test_tracker_update_schema() {
         let tracker = ProvenanceTracker::new(100);
-        tracker.register_dataset("ds-us", "test", DataSource::Unknown, 50, sample_columns(), b"data");
+        tracker.register_dataset("ds-us", "test", DataSource::Unknown, 50, sample_columns(), b"data").unwrap();
 
         let new_schema = SchemaSnapshot {
             columns: vec![ColumnSchema {
@@ -517,7 +579,7 @@ mod tests {
     #[test]
     fn test_get_lineage_existing_and_missing() {
         let tracker = ProvenanceTracker::new(100);
-        tracker.register_dataset("ds-gl", "test", DataSource::Unknown, 10, vec![], b"data");
+        tracker.register_dataset("ds-gl", "test", DataSource::Unknown, 10, vec![], b"data").unwrap();
 
         assert!(tracker.get_lineage("ds-gl").is_some());
         assert!(tracker.get_lineage("nonexistent").is_none());
@@ -526,7 +588,7 @@ mod tests {
     #[test]
     fn test_delete_existing_and_missing() {
         let tracker = ProvenanceTracker::new(100);
-        tracker.register_dataset("ds-del", "test", DataSource::Unknown, 10, vec![], b"data");
+        tracker.register_dataset("ds-del", "test", DataSource::Unknown, 10, vec![], b"data").unwrap();
 
         assert_eq!(tracker.count(), 1);
         assert!(tracker.delete("ds-del"));
@@ -542,10 +604,10 @@ mod tests {
         let tracker = ProvenanceTracker::new(100);
         assert_eq!(tracker.count(), 0);
 
-        tracker.register_dataset("ds-1", "a", DataSource::Unknown, 10, vec![], b"1");
+        tracker.register_dataset("ds-1", "a", DataSource::Unknown, 10, vec![], b"1").unwrap();
         assert_eq!(tracker.count(), 1);
 
-        tracker.register_dataset("ds-2", "b", DataSource::Unknown, 20, vec![], b"2");
+        tracker.register_dataset("ds-2", "b", DataSource::Unknown, 20, vec![], b"2").unwrap();
         assert_eq!(tracker.count(), 2);
 
         tracker.delete("ds-1");
@@ -563,16 +625,16 @@ mod tests {
         let tracker = ProvenanceTracker::new(100);
         tracker.register_dataset("ds-f", "file_ds", DataSource::FileUpload {
             filename: "a.csv".to_string(), mime_type: "text/csv".to_string(), size_bytes: 500,
-        }, 10, vec![], b"1");
+        }, 10, vec![], b"1").unwrap();
         tracker.register_dataset("ds-k", "kaggle_ds", DataSource::Kaggle {
             dataset_ref: "user/dataset".to_string(),
-        }, 20, vec![], b"2");
+        }, 20, vec![], b"2").unwrap();
         tracker.register_dataset("ds-u", "url_ds", DataSource::Url {
             url: "https://example.com/data.csv".to_string(),
-        }, 30, vec![], b"3");
+        }, 30, vec![], b"3").unwrap();
         tracker.register_dataset("ds-d", "derived_ds", DataSource::Derived {
             parent_id: "ds-f".to_string(),
-        }, 10, vec![], b"4");
+        }, 10, vec![], b"4").unwrap();
 
         let summaries = tracker.list_all();
         assert_eq!(summaries.len(), 4);
@@ -604,7 +666,7 @@ mod tests {
     #[test]
     fn test_total_processing_time() {
         let tracker = ProvenanceTracker::new(100);
-        tracker.register_dataset("ds-pt", "test", DataSource::Unknown, 100, vec![], b"d");
+        tracker.register_dataset("ds-pt", "test", DataSource::Unknown, 100, vec![], b"d").unwrap();
 
         for dur in [10, 20, 30] {
             let record = TransformationRecord {
@@ -666,7 +728,7 @@ mod tests {
         assert_eq!(tracker.count(), 0);
         // Default max is 1000, can store many
         for i in 0..5 {
-            tracker.register_dataset(&format!("ds-{}", i), "test", DataSource::Unknown, 1, vec![], b"d");
+            tracker.register_dataset(&format!("ds-{}", i), "test", DataSource::Unknown, 1, vec![], b"d").unwrap();
         }
         assert_eq!(tracker.count(), 5);
     }
@@ -688,11 +750,56 @@ mod tests {
             }),
         }];
         let tracker = ProvenanceTracker::new(100);
-        let lineage = tracker.register_dataset("ds-cs", "stats_test", DataSource::Unknown, 100, cols, b"data");
+        let lineage = tracker.register_dataset("ds-cs", "stats_test", DataSource::Unknown, 100, cols, b"data").unwrap();
 
         let schema = lineage.current_schema.unwrap();
         let stats = schema.columns[0].stats.as_ref().unwrap();
         assert_eq!(stats.count, 100);
         assert_eq!(stats.mean, Some(42.0));
+    }
+
+    #[test]
+    fn test_register_dataset_collision_is_rejected() {
+        let tracker = ProvenanceTracker::new(100);
+        tracker.register_dataset("ds-dup", "first", DataSource::Unknown, 10, vec![], b"a").unwrap();
+
+        let result = tracker.register_dataset("ds-dup", "second", DataSource::Unknown, 20, vec![], b"b");
+        assert!(result.is_err());
+
+        // Original lineage must be untouched by the rejected registration.
+        let lineage = tracker.get_lineage("ds-dup").unwrap();
+        assert_eq!(lineage.name, "first");
+        assert_eq!(lineage.row_count, 10);
+        assert!(tracker.get_archived_lineages("ds-dup").is_empty());
+    }
+
+    #[test]
+    fn test_register_dataset_replace_archives_previous_lineage() {
+        let tracker = ProvenanceTracker::new(100);
+        tracker.register_dataset("ds-rep", "first", DataSource::Unknown, 10, vec![], b"a").unwrap();
+
+        let replaced = tracker
+            .register_dataset_replace("ds-rep", "second", DataSource::Unknown, 20, vec![], b"b")
+            .unwrap();
+        assert_eq!(replaced.name, "second");
+
+        let current = tracker.get_lineage("ds-rep").unwrap();
+        assert_eq!(current.name, "second");
+        assert_eq!(current.row_count, 20);
+
+        let archived = tracker.get_archived_lineages("ds-rep");
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].name, "first");
+        assert_eq!(archived[0].row_count, 10);
+    }
+
+    #[test]
+    fn test_register_dataset_replace_on_new_id_behaves_like_register() {
+        let tracker = ProvenanceTracker::new(100);
+        let lineage = tracker
+            .register_dataset_replace("ds-new", "only", DataSource::Unknown, 5, vec![], b"x")
+            .unwrap();
+        assert_eq!(lineage.name, "only");
+        assert!(tracker.get_archived_lineages("ds-new").is_empty());
     }
 }

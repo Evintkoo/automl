@@ -39,6 +39,29 @@ impl Default for ControllerConfig {
     }
 }
 
+/// Which weight matrix a given categorical decision's logits came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionHead {
+    /// Number-of-layers choice (`hidden_to_layers`)
+    Layers,
+    /// Hidden-dimension choice (`hidden_to_dim`)
+    Dim,
+    /// Operation choice for a cell node (`hidden_to_op`)
+    Op,
+}
+
+/// Everything needed to compute the exact score-function (REINFORCE)
+/// gradient for one categorical decision made during `sample()`: which head
+/// produced it, the controller hidden state used as input to that head, the
+/// resulting softmax probabilities, and the action actually sampled.
+#[derive(Debug, Clone)]
+pub struct Decision {
+    pub head: DecisionHead,
+    pub hidden: Array1<f64>,
+    pub probs: Array1<f64>,
+    pub action: usize,
+}
+
 /// Controller state for architecture generation
 #[derive(Debug, Clone)]
 pub struct ControllerState {
@@ -48,6 +71,9 @@ pub struct ControllerState {
     pub log_probs: Vec<f64>,
     /// Entropies of distributions
     pub entropies: Vec<f64>,
+    /// Per-decision info needed for the analytic REINFORCE gradient (see
+    /// `NASController::update`).
+    pub decisions: Vec<Decision>,
 }
 
 impl ControllerState {
@@ -57,6 +83,7 @@ impl ControllerState {
             hidden: Array1::zeros(hidden_dim),
             log_probs: Vec::new(),
             entropies: Vec::new(),
+            decisions: Vec::new(),
         }
     }
 
@@ -159,6 +186,12 @@ impl NASController {
         let layer_idx = sample_categorical(&layer_probs, &mut self.rng);
         state.log_probs.push(layer_probs[layer_idx].ln());
         state.entropies.push(entropy(&layer_probs));
+        state.decisions.push(Decision {
+            head: DecisionHead::Layers,
+            hidden: state.hidden.clone(),
+            probs: layer_probs.clone(),
+            action: layer_idx,
+        });
 
         let num_layers = self.search_space.config.min_layers + layer_idx;
 
@@ -168,6 +201,12 @@ impl NASController {
         let dim_idx = sample_categorical(&dim_probs, &mut self.rng);
         state.log_probs.push(dim_probs[dim_idx].ln());
         state.entropies.push(entropy(&dim_probs));
+        state.decisions.push(Decision {
+            head: DecisionHead::Dim,
+            hidden: state.hidden.clone(),
+            probs: dim_probs.clone(),
+            action: dim_idx,
+        });
 
         let hidden_dim_choice = self.search_space.hidden_dim_choices()[dim_idx];
 
@@ -202,6 +241,12 @@ impl NASController {
                 let op_idx = sample_categorical(&op_probs, &mut self.rng);
                 state.log_probs.push(op_probs[op_idx].ln());
                 state.entropies.push(entropy(&op_probs));
+                state.decisions.push(Decision {
+                    head: DecisionHead::Op,
+                    hidden: state.hidden.clone(),
+                    probs: op_probs.clone(),
+                    action: op_idx,
+                });
 
                 let op_type = self.search_space.config.operations[op_idx];
                 let mut op = Operation::new(op_type);
@@ -247,30 +292,75 @@ impl NASController {
         (arch, state)
     }
 
-    /// Update controller based on reward
+    /// Update controller based on reward using a manual REINFORCE
+    /// (score-function) gradient estimate.
+    ///
+    /// This controller has no autodiff engine, so instead of backpropagating
+    /// through the sampling process we compute the policy-gradient update
+    /// analytically for the parameterization actually used here: every
+    /// action is drawn from a softmax categorical distribution whose logits
+    /// are `logits = W^T . hidden` for the relevant head (`hidden_to_layers`,
+    /// `hidden_to_dim`, or `hidden_to_op`). For a softmax categorical, the
+    /// score function has the closed form
+    /// `d log p(a) / d logits = one_hot(a) - p`, so
+    /// `d log p(a) / d W[h, j] = hidden[h] * (one_hot(a)[j] - p[j])`.
+    /// We scale that by the baseline-subtracted reward (the REINFORCE
+    /// advantage) and apply it as a gradient-*ascent* step on the relevant
+    /// weight matrix for every decision recorded in `state.decisions`.
+    ///
+    /// Known limitations vs. full REINFORCE: `recurrent_weights` and
+    /// `op_embeddings` are not updated here, since their effect on the
+    /// sampled actions runs through the hidden-state recurrence across
+    /// timesteps and would require backpropagation-through-time to get an
+    /// exact gradient for; only the direct logit-producing heads get the
+    /// exact analytic gradient. The entropy term is applied as a simple
+    /// heuristic push toward the uniform distribution (`entropy_weight *
+    /// (uniform - probs)`) rather than the exact analytic gradient of the
+    /// softmax entropy, since the closed form for that gradient is
+    /// significantly more involved and the heuristic already produces the
+    /// intended qualitative effect (more exploration when `entropy_weight`
+    /// is larger).
     pub fn update(&mut self, state: &ControllerState, reward: f64) {
         // Update baseline
-        self.baseline = self.config.baseline_decay * self.baseline 
+        self.baseline = self.config.baseline_decay * self.baseline
             + (1.0 - self.config.baseline_decay) * reward;
 
         let advantage = reward - self.baseline;
         let lr = self.config.learning_rate;
+        let entropy_weight = self.config.entropy_weight;
 
-        // REINFORCE update (simplified - actual implementation would use gradients)
-        // For each action, we adjust weights in the direction of the gradient
-        let policy_gradient = advantage * state.total_log_prob();
-        let entropy_bonus = self.config.entropy_weight * state.total_entropy();
-        let _loss = -policy_gradient - entropy_bonus;
+        for decision in &state.decisions {
+            let n = decision.probs.len();
+            if n == 0 {
+                continue;
+            }
+            let uniform = 1.0 / n as f64;
 
-        // Simplified weight update (in practice, would compute proper gradients)
-        for val in self.hidden_to_op.iter_mut() {
-            *val += lr * advantage * (self.rng.gen::<f64>() - 0.5) * 0.01;
-        }
-        for val in self.hidden_to_dim.iter_mut() {
-            *val += lr * advantage * (self.rng.gen::<f64>() - 0.5) * 0.01;
-        }
-        for val in self.hidden_to_layers.iter_mut() {
-            *val += lr * advantage * (self.rng.gen::<f64>() - 0.5) * 0.01;
+            // d log p(a) / d logits = one_hot(a) - p, scaled by the
+            // baseline-subtracted reward (the REINFORCE advantage), plus a
+            // heuristic entropy-exploration nudge (see doc comment above).
+            let mut grad_logits: Array1<f64> = decision.probs.mapv(|p| -advantage * p);
+            grad_logits[decision.action] += advantage;
+            for j in 0..n {
+                grad_logits[j] += entropy_weight * (uniform - decision.probs[j]);
+            }
+
+            let target = match decision.head {
+                DecisionHead::Layers => &mut self.hidden_to_layers,
+                DecisionHead::Dim => &mut self.hidden_to_dim,
+                DecisionHead::Op => &mut self.hidden_to_op,
+            };
+
+            // Gradient ascent on expected reward: logits = W^T . hidden, so
+            // d logits_j / d W[h, j] = hidden[h].
+            for (h, &hv) in decision.hidden.iter().enumerate() {
+                if hv == 0.0 {
+                    continue;
+                }
+                for (j, &g) in grad_logits.iter().enumerate() {
+                    target[[h, j]] += lr * hv * g;
+                }
+            }
         }
     }
 

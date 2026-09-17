@@ -38,6 +38,11 @@ pub struct SystemMonitor {
 }
 
 impl SystemMonitor {
+    /// Maximum number of metrics snapshots retained in history before the
+    /// oldest entries are evicted, to prevent unbounded memory growth when
+    /// `collect_and_store` is called on every tick for the process lifetime.
+    const MAX_METRICS_HISTORY: usize = 1000;
+
     /// Create a new SystemMonitor with the given collection interval
     pub fn new(interval_secs: f64) -> Self {
         Self {
@@ -98,7 +103,14 @@ impl SystemMonitor {
     /// Collect metrics and store them in history
     pub fn collect_and_store(&self) -> SystemMetrics {
         let metrics = Self::collect_metrics();
-        self.metrics_history.write().push(metrics.clone());
+        {
+            let mut history = self.metrics_history.write();
+            history.push(metrics.clone());
+            if history.len() > Self::MAX_METRICS_HISTORY {
+                let excess = history.len() - Self::MAX_METRICS_HISTORY;
+                history.drain(0..excess);
+            }
+        }
         metrics
     }
 

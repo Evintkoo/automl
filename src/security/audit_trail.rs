@@ -10,6 +10,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use parking_lot::RwLock;
 
@@ -108,6 +109,20 @@ pub struct AuditTrailEntry {
 pub struct AuditTrail {
     entries: Arc<RwLock<Vec<AuditTrailEntry>>>,
     max_entries: usize,
+    /// The real `prev_hash` of the current first (oldest surviving) entry, as recorded
+    /// at the moment it became the head due to eviction. `None` means no eviction has
+    /// happened yet and the chain still starts at the genesis hash. This is the
+    /// tamper-evidence anchor for `verify_integrity()`: it lets us confirm the current
+    /// head's `prev_hash` still matches what we ourselves recorded when the truncation
+    /// happened, instead of trusting an unauthenticated sentinel value.
+    truncated_prev_hash: Arc<RwLock<Option<String>>>,
+    /// Cumulative number of entries evicted from the front of the log over its lifetime.
+    truncated_count: Arc<RwLock<usize>>,
+    /// Monotonically increasing counter used to assign entry IDs. Unlike deriving
+    /// the id from `entries.len()`, this never goes backwards after an eviction,
+    /// so IDs stay unique (and sequential) across the entire lifetime of the trail,
+    /// not just across the entries currently held in the buffer.
+    next_id: Arc<AtomicU64>,
 }
 
 impl AuditTrail {
@@ -116,6 +131,9 @@ impl AuditTrail {
         Self {
             entries: Arc::new(RwLock::new(Vec::new())),
             max_entries,
+            truncated_prev_hash: Arc::new(RwLock::new(None)),
+            truncated_count: Arc::new(RwLock::new(0)),
+            next_id: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -128,7 +146,12 @@ impl AuditTrail {
     ) -> AuditTrailEntry {
         let mut entries = self.entries.write();
 
-        let id = entries.len() as u64;
+        // Derived from a monotonic counter, not `entries.len()`: after the first
+        // eviction below, `entries.len()` is permanently smaller than the true
+        // number of entries ever written, so deriving the id from it would
+        // eventually collide with a surviving entry's id. The counter only ever
+        // increments, so ids stay unique across evictions.
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let prev_hash = entries.last()
             .map(|e| e.hash.clone())
             .unwrap_or_else(|| "0".repeat(64));
@@ -153,15 +176,20 @@ impl AuditTrail {
         };
 
         // Evict oldest entries if at capacity (keep the most recent).
-        // After eviction, re-anchor the chain: the new first entry's prev_hash
-        // is set to a sentinel so verify_integrity() can still validate.
+        // We deliberately do NOT overwrite the new first entry's prev_hash with a
+        // sentinel - that would discard real hash-chain linkage and let anyone with
+        // write access to the stored entries relabel an arbitrarily-truncated head as
+        // valid. Instead we leave prev_hash untouched (it already holds the real hash
+        // of the entry that is being evicted) and separately record that same value as
+        // metadata at the moment of eviction, so verify_integrity() can confirm the
+        // head's prev_hash still matches what was legitimately recorded here rather
+        // than accepting any arbitrary value.
         if entries.len() >= self.max_entries {
             let drain_count = self.max_entries / 10;
             entries.drain(..drain_count);
-            // Re-anchor: mark the new first entry so integrity checks
-            // know the chain was truncated here.
-            if let Some(first) = entries.first_mut() {
-                first.prev_hash = "TRUNCATED".to_string();
+            *self.truncated_count.write() += drain_count;
+            if let Some(first) = entries.first() {
+                *self.truncated_prev_hash.write() = Some(first.prev_hash.clone());
             }
         }
 
@@ -198,15 +226,28 @@ impl AuditTrail {
                         message: format!("Chain broken at entry {}: prev_hash mismatch", entry.id),
                     };
                 }
-            } else if entry.prev_hash != "0".repeat(64) && entry.prev_hash != "TRUNCATED" {
-                // First entry must either be the genesis (all zeros) or a truncation point
-                return AuditIntegrityResult {
-                    valid: false,
-                    total_entries: entries.len(),
-                    verified_entries: verified,
-                    first_invalid_id: Some(entry.id),
-                    message: format!("First entry {} has unexpected prev_hash (possible tampering)", entry.id),
+            } else {
+                // The first (oldest surviving) entry must either be the genesis entry
+                // (prev_hash of all zeros, when no eviction has ever happened) or, if
+                // eviction has occurred, its prev_hash must match the value we recorded
+                // ourselves at the moment of truncation. This rejects any unauthenticated
+                // sentinel or hand-edited prev_hash on the head entry.
+                let truncated_count = *self.truncated_count.read();
+                let expected_prev_hash = if truncated_count == 0 {
+                    "0".repeat(64)
+                } else {
+                    self.truncated_prev_hash.read().clone().unwrap_or_default()
                 };
+
+                if entry.prev_hash != expected_prev_hash {
+                    return AuditIntegrityResult {
+                        valid: false,
+                        total_entries: entries.len(),
+                        verified_entries: verified,
+                        first_invalid_id: Some(entry.id),
+                        message: format!("First entry {} has unexpected prev_hash (possible tampering)", entry.id),
+                    };
+                }
             }
 
             // Verify entry's own hash
@@ -300,6 +341,9 @@ impl Clone for AuditTrail {
         Self {
             entries: Arc::clone(&self.entries),
             max_entries: self.max_entries,
+            truncated_prev_hash: Arc::clone(&self.truncated_prev_hash),
+            truncated_count: Arc::clone(&self.truncated_count),
+            next_id: Arc::clone(&self.next_id),
         }
     }
 }

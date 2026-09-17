@@ -307,6 +307,12 @@ impl PurgedTimeSeriesCV {
             return splits;
         }
 
+        // Embargo zones left behind by every fold's test window (test_end,
+        // test_end + embargo_after). Any later fold whose training range would
+        // otherwise include one of these zones must exclude it, so that samples
+        // immediately following a test window are never used for training.
+        let mut embargo_zones: Vec<(usize, usize)> = Vec::new();
+
         for fold in 0..self.n_splits {
             let test_start = (fold + 1) * test_size;
             let test_end = if fold == self.n_splits - 1 {
@@ -315,15 +321,21 @@ impl PurgedTimeSeriesCV {
                 (fold + 2) * test_size
             };
 
-            // Training includes all data before (test_start - purge)
+            // Training includes all data before (test_start - purge), minus any
+            // embargoed region left behind by earlier folds' test windows.
             let train_end = test_start.saturating_sub(self.purge_before);
-            
+
             if train_end < 1 {
+                embargo_zones.push((test_end, (test_end + self.embargo_after).min(n_samples)));
                 continue;
             }
 
-            let train_indices: Vec<usize> = (0..train_end).collect();
+            let train_indices: Vec<usize> = (0..train_end)
+                .filter(|&i| !embargo_zones.iter().any(|&(start, end)| i >= start && i < end))
+                .collect();
             let test_indices: Vec<usize> = (test_start..test_end).collect();
+
+            embargo_zones.push((test_end, (test_end + self.embargo_after).min(n_samples)));
 
             splits.push(TimeSeriesSplit {
                 train_indices,
@@ -427,5 +439,26 @@ mod tests {
             let test_start = *split.test_indices.first().unwrap();
             assert!(train_end + 2 <= test_start);
         }
+    }
+
+    #[test]
+    fn test_purged_cv_embargo_respected() {
+        let cv = PurgedTimeSeriesCV::new(3)
+            .with_purge(0)
+            .with_embargo(2);
+
+        let splits = cv.split(30);
+        assert_eq!(splits.len(), 3);
+
+        // test_size = 30 / (3 + 1) = 7
+        // Fold 0's test window is [7, 14) -> embargo zone [14, 16)
+        // Fold 2's training range (train_end = test_start = 21, purge = 0) would
+        // otherwise include indices 14 and 15, which must be excluded.
+        let fold2 = &splits[2];
+        assert!(!fold2.train_indices.contains(&14));
+        assert!(!fold2.train_indices.contains(&15));
+        // Indices outside the embargo zone should still be present.
+        assert!(fold2.train_indices.contains(&13));
+        assert!(fold2.train_indices.contains(&16));
     }
 }

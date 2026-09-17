@@ -221,6 +221,12 @@ impl AnomalyDetector for EllipticEnvelope {
         let n_samples = x.nrows();
         let n_features = x.ncols();
 
+        if n_samples < 2 {
+            return Err(AutoMLError::ValidationError(
+                "EllipticEnvelope::fit requires at least 2 samples".to_string(),
+            ));
+        }
+
         // Compute mean
         let mean: Array1<f64> = x.mean_axis(Axis(0)).ok_or_else(|| {
             AutoMLError::ValidationError("Failed to compute mean".to_string())

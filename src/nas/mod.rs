@@ -16,6 +16,6 @@ pub use search_space::{
     NASSearchSpace, Operation, OperationType, Cell, CellType,
     NetworkArchitecture, SearchSpaceConfig,
 };
-pub use controller::{NASController, ControllerConfig, ControllerState};
+pub use controller::{NASController, ControllerConfig, ControllerState, Decision, DecisionHead};
 pub use darts::{DARTSSearch, DARTSConfig, ArchitectureWeights};
 pub use evaluator::{ArchitectureEvaluator, EvaluationResult, EvaluationConfig};

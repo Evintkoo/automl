@@ -3,6 +3,8 @@
 //! Provides utilities for evaluating neural architecture performance.
 
 use ndarray::{Array1, Array2};
+use rand::prelude::*;
+use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -253,9 +255,10 @@ impl ArchitectureEvaluator {
         // Estimate parameters
         let num_params = self.estimate_params(arch);
 
-        // Simulate training (placeholder for actual neural network training)
-        let train_loss = self.simulate_training(arch, x_train, y_train, self.config.proxy_epochs);
-        let (val_loss, val_metric) = self.simulate_validation(arch, x_val, y_val);
+        // Fast proxy training/evaluation that actually uses x/y (see
+        // `proxy_fit_evaluate` for what this proxy is and isn't).
+        let (train_loss, val_loss, val_metric) =
+            self.proxy_fit_evaluate(arch, x_train, y_train, x_val, y_val, self.config.proxy_epochs);
 
         let result = EvaluationResult::new(arch_id)
             .with_losses(train_loss, val_loss)
@@ -284,9 +287,10 @@ impl ArchitectureEvaluator {
         let num_params = self.estimate_params(arch);
         let _flops = self.estimate_flops(arch, x_train.nrows());
 
-        // Simulate training
-        let train_loss = self.simulate_training(arch, x_train, y_train, self.config.epochs);
-        let (val_loss, val_metric) = self.simulate_validation(arch, x_val, y_val);
+        // Fast proxy training/evaluation with more "epochs" than the quick
+        // proxy path (still not full training of the candidate network).
+        let (train_loss, val_loss, val_metric) =
+            self.proxy_fit_evaluate(arch, x_train, y_train, x_val, y_val, self.config.epochs);
 
         let train_time = start_time.elapsed().as_secs_f64();
 
@@ -299,41 +303,135 @@ impl ArchitectureEvaluator {
         Ok(result)
     }
 
-    /// Simulate training (placeholder - returns synthetic loss based on architecture)
-    fn simulate_training(
+    /// Fast **proxy** evaluation that actually trains on `x_train`/`y_train`
+    /// and evaluates on `x_val`/`y_val`, instead of a formula that ignores
+    /// the data entirely.
+    ///
+    /// This is *not* full training of the candidate architecture (that would
+    /// require constructing and back-propagating through the actual cell
+    /// graph, which this evaluator does not do). Instead it fits a small,
+    /// fast model directly with `ndarray`:
+    /// - a fixed random projection of the raw features into
+    ///   `arch.hidden_dim` (capped) "hidden units" followed by `tanh`,
+    ///   giving the proxy at least some sensitivity to the architecture's
+    ///   claimed capacity (a crude Extreme-Learning-Machine-style stand-in
+    ///   for "a network with this many hidden units"), and
+    /// - a linear readout on top of that projection, trained with a few
+    ///   steps of full-batch gradient descent (least-squares/MSE loss) on a
+    ///   subsample of the training data for speed.
+    ///
+    /// The returned `val_loss`/`val_metric` are computed from real
+    /// predictions on the held-out `x_val`/`y_val`, so search loops built on
+    /// this evaluator get a real (if crude and fast) data-dependent signal
+    /// rather than one that only rewards architectures with more operations.
+    fn proxy_fit_evaluate(
         &self,
         arch: &NetworkArchitecture,
-        _x: &Array2<f64>,
-        _y: &Array1<f64>,
+        x_train: &Array2<f64>,
+        y_train: &Array1<f64>,
+        x_val: &Array2<f64>,
+        y_val: &Array1<f64>,
         epochs: usize,
-    ) -> f64 {
-        // Synthetic loss based on architecture complexity
-        let complexity = arch.cells.iter()
-            .map(|c| c.operations.len())
-            .sum::<usize>() as f64;
-        
-        let base_loss = 1.0 / (1.0 + 0.1 * complexity);
-        let decay = 0.95_f64.powi(epochs as i32);
-        
-        base_loss * decay
-    }
+    ) -> (f64, f64, f64) {
+        let n_train = x_train.nrows();
+        let n_val = x_val.nrows();
+        let input_dim = x_train.ncols();
 
-    /// Simulate validation (placeholder - returns synthetic metrics)
-    fn simulate_validation(
-        &self,
-        arch: &NetworkArchitecture,
-        _x: &Array2<f64>,
-        _y: &Array1<f64>,
-    ) -> (f64, f64) {
-        // Synthetic validation based on architecture
-        let complexity = arch.cells.iter()
-            .map(|c| c.operations.len())
-            .sum::<usize>() as f64;
-        
-        let val_loss = 0.5 / (1.0 + 0.05 * complexity);
-        let val_acc = 0.5 + 0.05 * complexity.min(10.0);
-        
-        (val_loss, val_acc)
+        if n_train == 0 || input_dim == 0 {
+            return (0.0, 0.0, 0.0);
+        }
+
+        // Seed deterministically off the architecture so repeated proxy
+        // evaluations of the same architecture (outside the cache) are
+        // reproducible.
+        let mut rng = Xoshiro256PlusPlus::seed_from_u64(arch.compute_hash());
+
+        // Subsample the training set for speed — this is a fast proxy, not
+        // full training.
+        const MAX_SAMPLES: usize = 256;
+        let sample_idx: Vec<usize> = if n_train > MAX_SAMPLES {
+            let mut idx: Vec<usize> = (0..n_train).collect();
+            idx.shuffle(&mut rng);
+            idx.truncate(MAX_SAMPLES);
+            idx
+        } else {
+            (0..n_train).collect()
+        };
+        let n_sub = sample_idx.len().max(1);
+
+        // Random-feature projection sized off the architecture's hidden
+        // dimension, so the proxy is at least somewhat architecture-aware.
+        let feature_dim = arch.hidden_dim.max(1).min(64);
+        let scale = 1.0 / (input_dim as f64).sqrt().max(1.0);
+        let mut projection = Array2::<f64>::zeros((input_dim, feature_dim));
+        for v in projection.iter_mut() {
+            *v = (rng.gen::<f64>() - 0.5) * 2.0 * scale;
+        }
+
+        let feat_train = x_train.dot(&projection).mapv(f64::tanh);
+        let feat_val = x_val.dot(&projection).mapv(f64::tanh);
+
+        // Linear readout, trained with full-batch gradient descent on MSE
+        // loss over the subsample.
+        let mut w = Array1::<f64>::zeros(feature_dim);
+        let mut b = 0.0f64;
+        let lr = 0.1;
+
+        for _ in 0..epochs.max(1) {
+            let mut grad_w = Array1::<f64>::zeros(feature_dim);
+            let mut grad_b = 0.0f64;
+
+            for &i in &sample_idx {
+                let feat = feat_train.row(i);
+                let pred = feat.dot(&w) + b;
+                let err = pred - y_train[i];
+                grad_w = grad_w + &(feat.to_owned() * err);
+                grad_b += err;
+            }
+
+            let n = n_sub as f64;
+            w = w - (grad_w / n) * lr;
+            b -= lr * grad_b / n;
+        }
+
+        // Training loss (MSE) on the subsample used to fit.
+        let mut train_sq_err = 0.0;
+        for &i in &sample_idx {
+            let pred = feat_train.row(i).dot(&w) + b;
+            let err = pred - y_train[i];
+            train_sq_err += err * err;
+        }
+        let train_loss = train_sq_err / n_sub as f64;
+
+        // Real validation loss/metric on the held-out split.
+        if n_val == 0 {
+            return (train_loss, train_loss, 0.0);
+        }
+
+        let mut val_sq_err = 0.0;
+        for i in 0..n_val {
+            let pred = feat_val.row(i).dot(&w) + b;
+            let err = pred - y_val[i];
+            val_sq_err += err * err;
+        }
+        let val_loss = val_sq_err / n_val as f64;
+
+        // "Accuracy-like" metric: 1 - normalized MSE (an R^2-style score),
+        // clamped to [0, 1] so it behaves like the accuracy metric callers
+        // expect regardless of whether `y` holds regression targets or
+        // 0/1 class labels.
+        let y_mean = y_val.mean().unwrap_or(0.0);
+        let y_var = y_val.iter().map(|v| (v - y_mean).powi(2)).sum::<f64>() / n_val as f64;
+        let val_metric = if y_var > 1e-10 {
+            (1.0 - val_loss / y_var).clamp(0.0, 1.0)
+        } else if val_loss < 1e-6 {
+            // Degenerate (near-constant) validation target that we matched.
+            1.0
+        } else {
+            0.0
+        };
+
+        (train_loss, val_loss, val_metric)
     }
 
     /// Get number of evaluations
@@ -375,7 +473,22 @@ impl MultiFidelityEvaluator {
     }
 
     /// Create with Hyperband-style fidelities
+    ///
+    /// `eta` must be > 1: `eta == 0` would panic on integer division, and
+    /// `eta == 1` would make `epochs /= eta` a no-op, so the loop below would
+    /// never terminate. Invalid values are clamped up to the documented
+    /// minimum of 2, with a warning.
     pub fn hyperband_style(max_epochs: usize, eta: usize) -> Self {
+        let eta = if eta > 1 {
+            eta
+        } else {
+            eprintln!(
+                "warning: MultiFidelityEvaluator::hyperband_style requires eta > 1, got {}; clamping to 2",
+                eta
+            );
+            2
+        };
+
         let mut levels = Vec::new();
         let mut epochs = max_epochs;
         while epochs >= 1 {

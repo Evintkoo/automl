@@ -217,6 +217,13 @@ impl Default for IsolationForest {
 impl AnomalyDetector for IsolationForest {
     fn fit(&mut self, x: &Array2<f64>) -> Result<()> {
         let n_samples = x.nrows();
+
+        if n_samples < 1 {
+            return Err(AutoMLError::ValidationError(
+                "IsolationForest::fit requires at least 1 sample".to_string(),
+            ));
+        }
+
         let samples_per_tree = self.max_samples.min(n_samples);
 
         let mut rng = match self.seed {

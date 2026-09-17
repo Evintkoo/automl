@@ -7,6 +7,12 @@ use polars::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Minimum spread (IQR or MAD) to use when computing outlier bounds. Mirrors
+/// `SCALE_EPSILON` in `scaler.rs`: without this floor, a degenerate/single-row
+/// fit collapses IQR or MAD to zero, so bounds become `(x, x)` and any future
+/// value that merely differs from the fitted `x` gets flagged as an outlier.
+const OUTLIER_SCALE_EPSILON: f64 = 1e-12;
+
 /// Method for outlier detection
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum OutlierMethod {
@@ -46,6 +52,22 @@ pub enum OutlierStrategy {
 impl Default for OutlierStrategy {
     fn default() -> Self {
         OutlierStrategy::Clip
+    }
+}
+
+/// Compute the median of an already-sorted slice.
+///
+/// For an even-length slice this averages the two middle elements rather than
+/// returning the upper-middle one (`sorted[len/2]` alone is biased high).
+fn median_of_sorted(sorted: &[f64]) -> f64 {
+    let n = sorted.len();
+    if n == 0 {
+        return 0.0;
+    }
+    if n % 2 == 0 {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    } else {
+        sorted[n / 2]
     }
 }
 
@@ -211,7 +233,7 @@ impl OutlierDetector {
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
         let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let median = sorted[sorted.len() / 2];
+        let median = median_of_sorted(&sorted);
 
         let (lower, upper) = match &self.method {
             OutlierMethod::IQR { factor } => {
@@ -219,7 +241,12 @@ impl OutlierDetector {
                 let q3_idx = 3 * sorted.len() / 4;
                 let q1 = sorted[q1_idx];
                 let q3 = sorted[q3_idx];
-                let iqr = q3 - q1;
+                let iqr_raw = q3 - q1;
+                let iqr = if iqr_raw.abs() < OUTLIER_SCALE_EPSILON {
+                    OUTLIER_SCALE_EPSILON
+                } else {
+                    iqr_raw
+                };
                 (q1 - factor * iqr, q3 + factor * iqr)
             }
             OutlierMethod::ZScore { threshold } => {
@@ -238,11 +265,16 @@ impl OutlierDetector {
             }
             OutlierMethod::ModifiedZScore { threshold } => {
                 // Modified Z-score uses median and MAD
-                let mad: f64 = sorted
+                let mad_raw: f64 = sorted
                     .iter()
                     .map(|x| (x - median).abs())
                     .sum::<f64>()
                     / sorted.len() as f64;
+                let mad = if mad_raw.abs() < OUTLIER_SCALE_EPSILON {
+                    OUTLIER_SCALE_EPSILON
+                } else {
+                    mad_raw
+                };
                 let k = 1.4826; // Consistency constant for normal distribution
                 (
                     median - threshold * k * mad,

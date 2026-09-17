@@ -123,7 +123,7 @@ impl Pruner for MedianPruner {
 
         // Compute median
         let mut sorted = values.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median = sorted[sorted.len() / 2];
 
         // Prune if worse than median
@@ -184,9 +184,9 @@ impl Pruner for PercentilePruner {
 
         let mut sorted = values.clone();
         if self.minimize {
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         } else {
-            sorted.sort_by(|a, b| b.partial_cmp(a).unwrap());
+            sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
         }
 
         let threshold_idx = ((sorted.len() as f64) * (self.percentile / 100.0)) as usize;
@@ -227,7 +227,16 @@ pub struct HyperbandPruner {
 
 impl HyperbandPruner {
     /// Create a new Hyperband pruner
+    ///
+    /// # Panics
+    /// Panics if `min_resource < 1`, since a resource of 0 combined with the
+    /// default `reduction_factor` would never advance `compute_rung`'s loop.
     pub fn new(min_resource: usize, max_resource: usize, minimize: bool) -> Self {
+        assert!(
+            min_resource >= 1,
+            "HyperbandPruner::new: min_resource must be >= 1, got {}",
+            min_resource
+        );
         Self {
             min_resource,
             max_resource,
@@ -239,7 +248,16 @@ impl HyperbandPruner {
     }
 
     /// Set reduction factor
+    ///
+    /// # Panics
+    /// Panics if `eta <= 1.0`, since `compute_rung`'s loop multiplies the
+    /// resource by `eta` each iteration and would never terminate otherwise.
     pub fn with_reduction_factor(mut self, eta: f64) -> Self {
+        assert!(
+            eta > 1.0,
+            "HyperbandPruner::with_reduction_factor: reduction_factor must be > 1.0, got {}",
+            eta
+        );
         self.reduction_factor = eta;
         self
     }
@@ -279,9 +297,9 @@ impl Pruner for HyperbandPruner {
 
         let mut sorted: Vec<(usize, f64)> = values.iter().enumerate().map(|(i, &v)| (i, v)).collect();
         if self.minimize {
-            sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+            sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         } else {
-            sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         }
 
         // Check if this trial is in the top trials

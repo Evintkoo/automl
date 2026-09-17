@@ -166,19 +166,37 @@ struct BufferKey {
 pub struct MemoryPool {
     /// Maximum number of buffers to pool per shape
     max_buffers_per_shape: usize,
+    /// Maximum number of distinct shape buckets tracked per category. Bounds
+    /// total memory under high shape variance (e.g. variable-length time
+    /// series, dynamic batching) by LRU-evicting the least-recently-used
+    /// shape bucket once this cap would be exceeded.
+    max_distinct_shapes: usize,
     /// Pool storage organized by category and shape
     pools: RwLock<HashMap<BufferCategory, HashMap<BufferKey, Vec<Vec<f64>>>>>,
+    /// Recency order of shape keys per category, least-recently-used at the front
+    shape_order: RwLock<HashMap<BufferCategory, Vec<BufferKey>>>,
     /// Statistics
     hits: AtomicU64,
     misses: AtomicU64,
 }
 
 impl MemoryPool {
+    /// Default cap on distinct shapes tracked per category before LRU eviction kicks in
+    const DEFAULT_MAX_DISTINCT_SHAPES: usize = 64;
+
     /// Create a new memory pool
     pub fn new(max_buffers_per_shape: usize) -> Arc<Self> {
+        Self::with_max_distinct_shapes(max_buffers_per_shape, Self::DEFAULT_MAX_DISTINCT_SHAPES)
+    }
+
+    /// Create a new memory pool with an explicit cap on the number of distinct
+    /// shapes tracked per category (LRU-evicted once exceeded)
+    pub fn with_max_distinct_shapes(max_buffers_per_shape: usize, max_distinct_shapes: usize) -> Arc<Self> {
         Arc::new(Self {
             max_buffers_per_shape,
+            max_distinct_shapes: max_distinct_shapes.max(1),
             pools: RwLock::new(HashMap::new()),
+            shape_order: RwLock::new(HashMap::new()),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         })
@@ -214,15 +232,37 @@ impl MemoryPool {
         let size_bytes = data.len() * std::mem::size_of::<f64>();
         let category = BufferCategory::from_size(size_bytes);
         let key = BufferKey { shape };
-        
+
         if let Ok(mut pools) = self.pools.write() {
             let category_pool = pools.entry(category).or_insert_with(HashMap::new);
-            let buffers = category_pool.entry(key).or_insert_with(Vec::new);
-            
+
+            // If this is a brand-new shape and we're already tracking the max
+            // number of distinct shapes for this category, evict the
+            // least-recently-used shape bucket to keep memory bounded.
+            if !category_pool.contains_key(&key) && category_pool.len() >= self.max_distinct_shapes {
+                if let Ok(mut order) = self.shape_order.write() {
+                    if let Some(order_list) = order.get_mut(&category) {
+                        if !order_list.is_empty() {
+                            let lru_key = order_list.remove(0);
+                            category_pool.remove(&lru_key);
+                        }
+                    }
+                }
+            }
+
+            let buffers = category_pool.entry(key.clone()).or_insert_with(Vec::new);
+
             if buffers.len() < self.max_buffers_per_shape {
                 buffers.push(data);
             }
             // Otherwise, let the buffer be dropped
+        }
+
+        // Record this shape as the most-recently-used for its category.
+        if let Ok(mut order) = self.shape_order.write() {
+            let order_list = order.entry(category).or_insert_with(Vec::new);
+            order_list.retain(|k| k != &key);
+            order_list.push(key);
         }
     }
     
@@ -244,6 +284,9 @@ impl MemoryPool {
     pub fn clear(&self) {
         if let Ok(mut pools) = self.pools.write() {
             pools.clear();
+        }
+        if let Ok(mut order) = self.shape_order.write() {
+            order.clear();
         }
     }
     
@@ -354,5 +397,23 @@ mod tests {
         let vec = buffer.into_vec();
         assert_eq!(vec[0], 42.0);
         assert_eq!(vec.len(), 5);
+    }
+
+    #[test]
+    fn test_distinct_shapes_bounded() {
+        // Cap distinct shapes per category at 3 - a workload with many unique
+        // shapes should never accumulate more than that many shape buckets.
+        let pool = MemoryPool::with_max_distinct_shapes(10, 3);
+
+        for n in 1..=20usize {
+            // Each shape is unique and small enough to land in the Small category.
+            let buffer = pool.get_buffer(vec![n]);
+            drop(buffer); // returned to the pool, tracked by shape
+        }
+
+        let pools = pool.pools.read().unwrap();
+        for category_pool in pools.values() {
+            assert!(category_pool.len() <= 3, "distinct shapes exceeded cap: {}", category_pool.len());
+        }
     }
 }

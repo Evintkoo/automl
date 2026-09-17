@@ -428,11 +428,16 @@ impl Default for BinEncoding {
 }
 
 impl Binner {
-    /// Create a new binner
+    /// Create a new binner.
+    ///
+    /// `n_bins` is clamped to a minimum of 1 (matching the convention used by
+    /// e.g. `PolynomialFeatures::new`/`KNNImputer::new`), since `n_bins == 0`
+    /// would leave `kmeans_bin_edges` indexing into an empty centroids/clusters
+    /// vec on the first value processed.
     pub fn new(strategy: BinningStrategy, n_bins: usize) -> Self {
         Self {
             strategy,
-            n_bins,
+            n_bins: n_bins.max(1),
             bin_edges: HashMap::new(),
             encode: BinEncoding::Ordinal,
             is_fitted: false,
@@ -605,13 +610,31 @@ impl Binner {
 
     /// Find which bin a value belongs to
     fn find_bin(&self, value: f64, edges: &[f64]) -> usize {
+        let n_bins = edges.len().saturating_sub(1);
         for (i, window) in edges.windows(2).enumerate() {
-            if value >= window[0] && value <= window[1] {
+            // Half-open interval [edge_i, edge_{i+1}) for every bin except the
+            // last, which is closed on both ends so the maximum value is
+            // included. This is the standard quantile-binning convention: a
+            // value exactly on an interior edge is assigned to the bin it
+            // *starts*, not the one it ends, avoiding a systematic bias toward
+            // lower bins when ties sit exactly on a computed boundary.
+            let is_last = i == n_bins.saturating_sub(1);
+            let in_bin = if is_last {
+                value >= window[0] && value <= window[1]
+            } else {
+                value >= window[0] && value < window[1]
+            };
+            if in_bin {
                 return i;
             }
         }
-        // Edge case: return last bin
-        edges.len().saturating_sub(2)
+        // Edge case: value below the first edge or above the last - clamp to
+        // the nearest bin.
+        if !edges.is_empty() && value < edges[0] {
+            0
+        } else {
+            n_bins.saturating_sub(1)
+        }
     }
 
     /// Fit and transform in one step

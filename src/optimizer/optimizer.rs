@@ -100,7 +100,8 @@ pub struct HyperOptX {
 impl HyperOptX {
     /// Create a new optimizer
     pub fn new(config: OptimizationConfig, search_space: SearchSpace) -> Self {
-        let sampler = create_sampler(config.sampler.clone(), config.random_state);
+        let minimize = matches!(config.direction, OptimizeDirection::Minimize);
+        let sampler = create_sampler(config.sampler.clone(), config.random_state, minimize);
         let study = Study::new(config.direction.clone());
 
         Self {
@@ -187,6 +188,11 @@ impl HyperOptX {
                         OptimizeDirection::Minimize => f64::INFINITY,
                         OptimizeDirection::Maximize => f64::NEG_INFINITY,
                     };
+
+                    // An erroring trial is treated the same as a non-improving
+                    // trial for early-stopping patience, otherwise a run whose
+                    // objective repeatedly errors never triggers early stopping.
+                    trials_without_improvement += 1;
 
                     TrialResult {
                         trial_id,

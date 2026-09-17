@@ -109,7 +109,7 @@ fn test_conformal_predictor_90_percent_coverage() {
     // Calibration: 200 points, true values = pred + constant 0.5
     let cal_preds: Vec<f64> = (0..200).map(|i| i as f64).collect();
     let cal_targets: Vec<f64> = cal_preds.iter().map(|p| p + 0.5).collect();
-    let cp = ConformalPredictor::fit(&cal_preds, &cal_targets, 0.90);
+    let cp = ConformalPredictor::fit(&cal_preds, &cal_targets, 0.90).unwrap();
 
     // All residuals are 0.5, so quantile should be ~0.5
     assert!((cp.quantile - 0.5).abs() < 0.1, "quantile should ≈ 0.5, got {}", cp.quantile);

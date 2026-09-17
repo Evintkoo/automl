@@ -187,10 +187,13 @@ impl AdaBoostClassifier {
             // Clamp error to avoid division issues
             error = error.clamp(1e-15, 1.0 - 1e-15);
 
-            // SAMME alpha for multi-class
+            // SAMME alpha for multi-class. `learning_rate` must scale the WHOLE expression
+            // (matching the standard SAMME/SAMME.R update, e.g. scikit-learn's
+            // AdaBoostClassifier: `learning_rate * (ln((1-err)/err) + ln(K-1))`), not just the
+            // error term — previously `learning_rate` only multiplied the first term, leaving
+            // the `ln(K-1)` class-count correction unscaled for any custom learning rate.
             let alpha = self.learning_rate
-                * ((1.0 - error) / error).ln()
-                + (n_classes as f64 - 1.0).max(1.0).ln();
+                * (((1.0 - error) / error).ln() + (n_classes as f64 - 1.0).max(1.0).ln());
 
             // Update weights
             for i in 0..n_samples {

@@ -60,7 +60,8 @@ impl VotingClassifier {
         let n_samples = x.nrows();
         let n_models = models.len();
 
-        // Get predictions from all models
+        // Hard label predictions. Used directly for Hard voting, and also as the source of
+        // the global class set (and the one-hot fallback) for Soft voting below.
         let predictions: Result<Vec<Array1<f64>>> =
             models.iter().map(|m| m.predict(x)).collect();
         let predictions = predictions?;
@@ -71,6 +72,14 @@ impl VotingClassifier {
             .clone()
             .unwrap_or_else(|| vec![1.0 / n_models as f64; n_models]);
 
+        if weights.len() != n_models {
+            return Err(AutoMLError::ValidationError(format!(
+                "Number of weights ({}) does not match number of models ({})",
+                weights.len(),
+                n_models
+            )));
+        }
+
         // Normalize weights
         let weight_sum: f64 = weights.iter().sum();
         let weights: Vec<f64> = weights.iter().map(|w| w / weight_sum).collect();
@@ -80,9 +89,94 @@ impl VotingClassifier {
                 self.hard_vote(&predictions, &weights, n_samples)
             }
             VotingStrategy::Soft => {
-                self.soft_vote(&predictions, &weights, n_samples)
+                // Soft voting must average per-class PROBABILITIES, not raw label integers
+                // (averaging labels like {0, 1, 2} is meaningless — e.g. they'd average to
+                // ~1.0 regardless of which classes were actually predicted, collapsing any
+                // 3+-class problem to a binary-looking result). Build a per-model
+                // (n_samples x n_classes) probability matrix — using `Model::predict_proba`
+                // when a model supports it, falling back to a one-hot encoding of its hard
+                // label otherwise — then average those matrices and take the argmax class.
+                let mut classes: Vec<i64> = predictions
+                    .iter()
+                    .flat_map(|p| p.iter().map(|&v| v.round() as i64))
+                    .collect();
+                classes.sort_unstable();
+                classes.dedup();
+                let n_classes = classes.len().max(1);
+
+                let proba_matrices: Result<Vec<Array2<f64>>> = models
+                    .iter()
+                    .zip(predictions.iter())
+                    .map(|(m, hard_pred)| -> Result<Array2<f64>> {
+                        if let Some(proba) = m.predict_proba(x)? {
+                            if proba.nrows() == n_samples && proba.ncols() == n_classes {
+                                return Ok(proba);
+                            }
+                            // Shape mismatch against the global class set (e.g. a model that
+                            // only ever saw a subset of classes) — fall back to one-hot below
+                            // rather than risk misaligned columns.
+                        }
+                        Ok(Self::one_hot(hard_pred, &classes, n_samples, n_classes))
+                    })
+                    .collect();
+                let proba_matrices = proba_matrices?;
+
+                self.soft_vote_proba(&proba_matrices, &weights, &classes, n_samples)
             }
         }
+    }
+
+    /// One-hot encode a model's hard label predictions against the global `classes` list.
+    /// Used as the soft-voting fallback for models that don't implement `predict_proba`.
+    fn one_hot(
+        hard_pred: &Array1<f64>,
+        classes: &[i64],
+        n_samples: usize,
+        n_classes: usize,
+    ) -> Array2<f64> {
+        let mut onehot = Array2::zeros((n_samples, n_classes));
+        for (i, &label) in hard_pred.iter().enumerate() {
+            let li = label.round() as i64;
+            if let Some(col) = classes.iter().position(|&c| c == li) {
+                onehot[[i, col]] = 1.0;
+            }
+        }
+        onehot
+    }
+
+    /// Soft-vote by averaging per-class probability matrices (weighted per model) and taking
+    /// the argmax class per row. This is the actual per-class-probability averaging that
+    /// "soft voting" is supposed to do — see `predict_from_models`'s `VotingStrategy::Soft`
+    /// arm for how the per-model probability matrices are obtained.
+    fn soft_vote_proba(
+        &self,
+        probas: &[Array2<f64>],
+        weights: &[f64],
+        classes: &[i64],
+        n_samples: usize,
+    ) -> Result<Array1<f64>> {
+        let n_classes = classes.len().max(1);
+        let mut result = Array1::zeros(n_samples);
+
+        for i in 0..n_samples {
+            let mut class_scores = vec![0.0f64; n_classes];
+            for (proba, &weight) in probas.iter().zip(weights.iter()) {
+                for c in 0..n_classes {
+                    class_scores[c] += proba[[i, c]] * weight;
+                }
+            }
+
+            let winner = class_scores
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+
+            result[i] = classes.get(winner).copied().unwrap_or(0) as f64;
+        }
+
+        Ok(result)
     }
 
     /// Predict from raw predictions (for use with external models)
@@ -103,6 +197,14 @@ impl VotingClassifier {
         let weights: Vec<f64> = weights
             .map(|w| w.to_vec())
             .unwrap_or_else(|| vec![1.0 / n_models as f64; n_models]);
+
+        if weights.len() != n_models {
+            return Err(AutoMLError::ValidationError(format!(
+                "Number of weights ({}) does not match number of predictions ({})",
+                weights.len(),
+                n_models
+            )));
+        }
 
         let weight_sum: f64 = weights.iter().sum();
         let weights: Vec<f64> = weights.iter().map(|w| w / weight_sum).collect();
@@ -129,12 +231,22 @@ impl VotingClassifier {
                 *vote_counts.entry(class).or_insert(0.0) += weight;
             }
 
-            // Find majority vote
-            let winner = vote_counts
-                .into_iter()
-                .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-                .map(|(class, _)| class)
-                .unwrap_or(0);
+            // Find majority vote, breaking ties deterministically by lowest class label
+            // instead of relying on HashMap iteration order (which is randomized per-process
+            // and made the previous `into_iter().max_by(...)` non-deterministic across runs
+            // whenever two or more classes tied on weight).
+            let mut classes: Vec<i64> = vote_counts.keys().copied().collect();
+            classes.sort_unstable();
+
+            let mut winner = 0i64;
+            let mut best_weight = f64::MIN;
+            for &class in &classes {
+                let w = vote_counts[&class];
+                if w > best_weight {
+                    best_weight = w;
+                    winner = class;
+                }
+            }
 
             result[i] = winner as f64;
         }
@@ -182,6 +294,14 @@ impl VotingClassifier {
         let weights: Vec<f64> = weights
             .map(|w| w.to_vec())
             .unwrap_or_else(|| vec![1.0 / n_models as f64; n_models]);
+
+        if weights.len() != n_models {
+            return Err(AutoMLError::ValidationError(format!(
+                "Number of weights ({}) does not match number of predictions ({})",
+                weights.len(),
+                n_models
+            )));
+        }
 
         let weight_sum: f64 = weights.iter().sum();
         let weights: Vec<f64> = weights.iter().map(|w| w / weight_sum).collect();
@@ -285,6 +405,14 @@ impl VotingRegressor {
         let weights: Vec<f64> = weights
             .map(|w| w.to_vec())
             .unwrap_or_else(|| vec![1.0 / n_models as f64; n_models]);
+
+        if weights.len() != n_models {
+            return Err(AutoMLError::ValidationError(format!(
+                "Number of weights ({}) does not match number of predictions ({})",
+                weights.len(),
+                n_models
+            )));
+        }
 
         let weight_sum: f64 = weights.iter().sum();
         let weights: Vec<f64> = weights.iter().map(|w| w / weight_sum).collect();

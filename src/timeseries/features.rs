@@ -9,7 +9,12 @@ use serde::{Deserialize, Serialize};
 pub struct LagConfig {
     /// Lag periods to create
     pub lags: Vec<usize>,
-    /// Fill value for missing data
+    /// Fill value for the leading rows that have no lagged observation yet.
+    /// Defaults to `NaN`, marking those rows as genuinely unknown/missing -
+    /// consistent with `create_diff`'s convention - rather than as a
+    /// legitimate zero-valued observation (which would bias a downstream
+    /// model near the start of any series). Set explicitly to override, e.g.
+    /// back to `0.0` if that behavior is deliberately wanted.
     pub fill_value: f64,
 }
 
@@ -17,7 +22,7 @@ impl Default for LagConfig {
     fn default() -> Self {
         Self {
             lags: vec![1, 2, 3, 7, 14],
-            fill_value: 0.0,
+            fill_value: f64::NAN,
         }
     }
 }

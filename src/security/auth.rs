@@ -162,6 +162,13 @@ impl SecurityManager {
         }
     }
 
+    /// Whether API-key authentication is enabled for this deployment. When it is
+    /// not (e.g. local/self-hosted usage), there is no caller identity to restrict
+    /// and every caller is equivalent to an operator of the local install.
+    pub fn api_key_auth_enabled(&self) -> bool {
+        self.config.enable_api_key_auth
+    }
+
     pub fn verify_api_key(&self, key: &str) -> bool {
         if !self.config.enable_api_key_auth {
             return true;

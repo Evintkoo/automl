@@ -72,20 +72,42 @@ impl ModelMetrics {
             .count();
         metrics.accuracy = Some(correct as f64 / y_true.len() as f64);
 
-        // Precision, Recall, F1
-        let (tp, fp, _, fn_) = Self::confusion_counts(y_true, y_pred);
-        
-        metrics.precision = if tp + fp > 0 {
-            Some(tp as f64 / (tp + fp) as f64)
-        } else {
-            Some(0.0)
-        };
+        // Precision, Recall, F1.
+        //
+        // Determine the distinct class labels present (rounded to the nearest integer, since
+        // class values are discrete labels stored as f64). For the classic binary case
+        // (labels {0, 1}), keep the original positive-class-is-1 behavior unchanged. For 3+
+        // classes, use macro-averaged one-vs-rest per-class precision/recall instead of
+        // thresholding both true and predicted values at >0.5 — that old approach collapsed
+        // every class >=1 into a single "positive" bucket (e.g. true=1/pred=2 counted as a
+        // true positive), which is wrong for multiclass problems.
+        let mut classes: Vec<i64> = y_true
+            .iter()
+            .chain(y_pred.iter())
+            .map(|v| v.round() as i64)
+            .collect();
+        classes.sort_unstable();
+        classes.dedup();
 
-        metrics.recall = if tp + fn_ > 0 {
-            Some(tp as f64 / (tp + fn_) as f64)
+        if classes.iter().all(|&c| c == 0 || c == 1) {
+            let (tp, fp, _, fn_) = Self::confusion_counts(y_true, y_pred);
+
+            metrics.precision = if tp + fp > 0 {
+                Some(tp as f64 / (tp + fp) as f64)
+            } else {
+                Some(0.0)
+            };
+
+            metrics.recall = if tp + fn_ > 0 {
+                Some(tp as f64 / (tp + fn_) as f64)
+            } else {
+                Some(0.0)
+            };
         } else {
-            Some(0.0)
-        };
+            let (precision, recall) = Self::macro_confusion_metrics(y_true, y_pred, &classes);
+            metrics.precision = Some(precision);
+            metrics.recall = Some(recall);
+        }
 
         if let (Some(p), Some(r)) = (metrics.precision, metrics.recall) {
             metrics.f1_score = if p + r > 0.0 {
@@ -96,6 +118,57 @@ impl ModelMetrics {
         }
 
         metrics
+    }
+
+    /// Macro-averaged multiclass precision/recall: for each class `c`, compute one-vs-rest
+    /// TP/FP/FN (true==c vs pred==c), derive that class's precision/recall, then average
+    /// across all classes (each class weighted equally regardless of support).
+    fn macro_confusion_metrics(
+        y_true: &Array1<f64>,
+        y_pred: &Array1<f64>,
+        classes: &[i64],
+    ) -> (f64, f64) {
+        if classes.is_empty() {
+            return (0.0, 0.0);
+        }
+
+        let mut precisions = Vec::with_capacity(classes.len());
+        let mut recalls = Vec::with_capacity(classes.len());
+
+        for &c in classes {
+            let mut tp = 0usize;
+            let mut fp = 0usize;
+            let mut fn_ = 0usize;
+
+            for (t, p) in y_true.iter().zip(y_pred.iter()) {
+                let t_is_c = t.round() as i64 == c;
+                let p_is_c = p.round() as i64 == c;
+
+                match (t_is_c, p_is_c) {
+                    (true, true) => tp += 1,
+                    (false, true) => fp += 1,
+                    (true, false) => fn_ += 1,
+                    (false, false) => {}
+                }
+            }
+
+            precisions.push(if tp + fp > 0 {
+                tp as f64 / (tp + fp) as f64
+            } else {
+                0.0
+            });
+            recalls.push(if tp + fn_ > 0 {
+                tp as f64 / (tp + fn_) as f64
+            } else {
+                0.0
+            });
+        }
+
+        let n = classes.len() as f64;
+        (
+            precisions.iter().sum::<f64>() / n,
+            recalls.iter().sum::<f64>() / n,
+        )
     }
 
     /// Compute regression metrics
@@ -168,6 +241,18 @@ pub trait Model: Send + Sync {
 
     /// Make predictions
     fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>>;
+
+    /// Predict per-class probability vectors, for classifiers that support it: one row per
+    /// sample, one column per class, ordered by ascending class label, each row summing to 1.
+    ///
+    /// Returns `Ok(None)` (the default) for models that only support hard-label prediction —
+    /// callers that need probabilities (e.g. soft voting, probability-based stacking) should
+    /// treat `None` as "fall back to a one-hot encoding of `predict()`'s hard label" rather
+    /// than as an error, which is a reasonable, documented degradation for models that
+    /// genuinely can't produce calibrated probabilities.
+    fn predict_proba(&self, _x: &Array2<f64>) -> Result<Option<Array2<f64>>> {
+        Ok(None)
+    }
 
     /// Get feature importances (if available)
     fn feature_importances(&self) -> Option<Array1<f64>> {

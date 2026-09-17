@@ -184,16 +184,26 @@ impl Scaler {
 
         match self.scaler_type {
             ScalerType::Standard => {
-                let mean = ca.mean().unwrap_or(0.0);
-                let std = ca.std(1).unwrap_or(1.0);
+                // Polars' mean()/std() propagate float NaN (unlike null, which is
+                // skipped), so a single NaN would otherwise poison the whole-column
+                // statistic. Explicitly drop NaNs before aggregating.
+                let clean = ca
+                    .filter(&ca.is_not_nan())
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?;
+                let mean = clean.mean().unwrap_or(0.0);
+                let std = clean.std(1).unwrap_or(1.0);
                 Ok(ScalerParams {
                     center: mean,
                     scale: if std.abs() < SCALE_EPSILON { 1.0 } else { std },
                 })
             }
             ScalerType::MinMax => {
-                let min = ca.min().unwrap_or(0.0);
-                let max = ca.max().unwrap_or(1.0);
+                // Same NaN-propagation issue as Standard above.
+                let clean = ca
+                    .filter(&ca.is_not_nan())
+                    .map_err(|e| AutoMLError::DataError(e.to_string()))?;
+                let min = clean.min().unwrap_or(0.0);
+                let max = clean.max().unwrap_or(1.0);
                 let range = max - min;
                 Ok(ScalerParams {
                     center: min,
@@ -204,7 +214,10 @@ impl Scaler {
                 // Single sort for Q1/Q3: uses nearest-rank (vals[n/4], vals[3n/4])
                 // instead of Polars QuantileMethod::Linear — small numeric difference
                 // on datasets with n < ~20, negligible otherwise.
-                let mut vals: Vec<f64> = ca.into_no_null_iter().collect();
+                // `into_no_null_iter` only skips Polars null, not float NaN, so
+                // NaN must be filtered explicitly to avoid poisoning the sort
+                // (and therefore the median/IQR) below.
+                let mut vals: Vec<f64> = ca.into_no_null_iter().filter(|v| !v.is_nan()).collect();
                 if vals.is_empty() {
                     return Ok(ScalerParams { center: 0.0, scale: 1.0 });
                 }
@@ -224,6 +237,9 @@ impl Scaler {
                 })
             }
             ScalerType::MaxAbs => {
+                // Note: f64::max returns the non-NaN operand when either side is
+                // NaN, so this fold already ignores NaN values without needing an
+                // explicit filter (unlike ca.min()/ca.max() used elsewhere above).
                 let max_abs = ca
                     .into_iter()
                     .filter_map(|v| v.map(|x| x.abs()))

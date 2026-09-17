@@ -371,10 +371,16 @@ impl ONNXExporter {
         let file = File::create(path.as_ref()).map_err(|e| {
             AutoMLError::DataError(format!("Failed to create file: {}", e))
         })?;
-        let writer = BufWriter::new(file);
+        let mut writer = BufWriter::new(file);
 
-        serde_json::to_writer_pretty(writer, &onnx_model).map_err(|e| {
+        serde_json::to_writer_pretty(&mut writer, &onnx_model).map_err(|e| {
             AutoMLError::SerializationError(format!("Failed to write ONNX JSON: {}", e))
+        })?;
+
+        // Ensure buffered bytes actually reach the OS before reporting success;
+        // BufWriter's Drop impl flushes but silently discards any I/O error.
+        writer.flush().map_err(|e| {
+            AutoMLError::DataError(format!("Failed to flush file: {}", e))
         })?;
 
         Ok(())
@@ -423,6 +429,12 @@ impl ONNXExporter {
                 }
             }
         }
+
+        // Ensure buffered bytes actually reach the OS before reporting success;
+        // BufWriter's Drop impl flushes but silently discards any I/O error.
+        writer.flush().map_err(|e| {
+            AutoMLError::DataError(format!("Failed to flush file: {}", e))
+        })?;
 
         Ok(())
     }

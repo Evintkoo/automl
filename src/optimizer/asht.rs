@@ -116,8 +116,25 @@ pub struct ASHT {
 
 impl ASHT {
     /// Create a new ASHT optimizer
+    ///
+    /// # Panics
+    /// Panics if `config.min_resource < 1` or `config.reduction_factor <= 1.0`.
+    /// Either condition makes `compute_s_max`'s `ln` ratio diverge (or the
+    /// subsequent bracket sizing attempt a near-unbounded allocation).
     pub fn new(config: ASHTConfig, search_space: SearchSpace) -> Self {
-        let sampler = create_sampler_from_config(config.sampler.clone(), config.random_state);
+        assert!(
+            config.min_resource >= 1,
+            "ASHT::new: config.min_resource must be >= 1, got {}",
+            config.min_resource
+        );
+        assert!(
+            config.reduction_factor > 1.0,
+            "ASHT::new: config.reduction_factor must be > 1.0, got {}",
+            config.reduction_factor
+        );
+
+        let sampler =
+            create_sampler_from_config(config.sampler.clone(), config.random_state, config.minimize);
         let best_value = if config.minimize { f64::INFINITY } else { f64::NEG_INFINITY };
 
         Self {
@@ -153,8 +170,15 @@ impl ASHT {
         for s in (0..=s_max).rev() {
             // Number of configurations
             let n = ((s_max + 1) as f64 * eta.powi(s as i32) / (s + 1) as f64).ceil() as usize;
-            // Starting resource
-            let r = max_r / eta.powi(s as i32) as usize;
+            // Starting resource.
+            //
+            // NOTE: `eta.powi(s as i32) as usize` truncates the f64 divisor to
+            // an integer *before* the division happens (in Rust, `as` binds
+            // tighter than `/`), which silently loses precision whenever
+            // `eta` is non-integer (e.g. eta=2.5 at s=1 truncates the divisor
+            // to 2 instead of dividing by 2.5). Compute entirely in f64 and
+            // only round to an integer resource count at the very end.
+            let r = ((max_r as f64) / eta.powi(s as i32)).round() as usize;
             let r = r.max(self.config.min_resource);
 
             // Sample configurations
@@ -360,13 +384,13 @@ impl ASHT {
             indices.sort_by(|&a, &b| {
                 bracket.trials[a].best_value
                     .partial_cmp(&bracket.trials[b].best_value)
-                    .unwrap()
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
         } else {
             indices.sort_by(|&a, &b| {
                 bracket.trials[b].best_value
                     .partial_cmp(&bracket.trials[a].best_value)
-                    .unwrap()
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
         }
 

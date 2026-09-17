@@ -9,7 +9,7 @@ pub mod audit_trail;
 
 pub use auth::{SecurityManager, SecurityConfig, SecurityStatus, ApiKeyVerifier, JwtVerifier};
 pub use rate_limiter::{RateLimiter, RateLimitConfig, RateLimitAlgorithm};
-pub use tls::{TlsManager, TlsConfig, CertificateInfo};
+pub use tls::{TlsManager, TlsConfig, CertificateInfo, ExpiryStatus};
 pub use secrets::{SecretsManager, SecretType, SecretMetadata};
 pub use middleware::SecurityMiddleware;
 pub use rbac::{RbacManager, Role, Resource, Action, Permission};

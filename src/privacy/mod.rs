@@ -289,14 +289,26 @@ impl Default for PiiScanner {
 pub enum AnonymizationMethod {
     /// Remove the column entirely
     Suppress,
-    /// Replace with a hash-based pseudonym
-    Pseudonymize { salt: String },
+    /// Replace with an HMAC-SHA256-based pseudonym.
+    ///
+    /// `secret_key` is used as the HMAC key and **must be treated as a
+    /// secret** (like a signing key), not a public salt — anyone who learns
+    /// it can brute-force low-cardinality inputs (SSNs, phone numbers,
+    /// common names) and can re-link pseudonyms across any dataset that
+    /// reuses the same key.
+    Pseudonymize { secret_key: String },
     /// Generalize values (e.g., age -> age range)
     Generalize { bins: Vec<f64> },
     /// Mask part of the value (e.g., email -> j***@example.com)
     Mask { visible_chars: usize },
-    /// Replace with random value from same distribution
-    Randomize,
+    /// Replace with random value from same distribution (Fisher-Yates shuffle).
+    ///
+    /// `seed`: when `None` (the recommended default), the shuffle RNG is
+    /// seeded from OS entropy so the resulting permutation cannot be
+    /// reconstructed or reversed. Pass `Some(seed)` only to get a
+    /// reproducible/deterministic shuffle for testing — never as the
+    /// default for data that needs a real privacy guarantee.
+    Randomize { seed: Option<u64> },
 }
 
 /// Anonymizer for applying privacy transformations
@@ -312,12 +324,19 @@ impl Anonymizer {
             AnonymizationMethod::Suppress => {
                 vec!["[REDACTED]".to_string(); values.len()]
             }
-            AnonymizationMethod::Pseudonymize { salt } => {
+            AnonymizationMethod::Pseudonymize { secret_key } => {
+                use hmac::{Hmac, Mac};
+                use sha2::Sha256;
+                type HmacSha256 = Hmac<Sha256>;
                 values.iter().map(|v| {
-                    use sha2::{Digest, Sha256};
-                    let mut hasher = Sha256::new();
-                    hasher.update(format!("{}{}", salt, v));
-                    format!("pseudo_{}", &format!("{:x}", hasher.finalize())[..12])
+                    // Full HMAC-SHA256 output (256 bits), not a truncated hash of a
+                    // public salt: this resists precomputation/brute-force attacks
+                    // as long as `secret_key` stays secret.
+                    let mut mac = HmacSha256::new_from_slice(secret_key.as_bytes())
+                        .expect("HMAC-SHA256 accepts a key of any length");
+                    mac.update(v.as_bytes());
+                    let digest = mac.finalize().into_bytes();
+                    format!("pseudo_{:x}", digest)
                 }).collect()
             }
             AnonymizationMethod::Mask { visible_chars } => {
@@ -349,13 +368,19 @@ impl Anonymizer {
                     }
                 }).collect()
             }
-            AnonymizationMethod::Randomize => {
-                // Fisher-Yates shuffle with a seeded PRNG for reproducibility
-                // but not trivially reversible
+            AnonymizationMethod::Randomize { seed } => {
+                // Fisher-Yates shuffle. Default path (seed == None) draws a fresh
+                // seed from OS entropy on every call, so the permutation cannot be
+                // precomputed or reversed by anyone who knows this code — unlike a
+                // hardcoded seed, which would make the shuffle a pure function of
+                // `values.len()` and fully reconstructible.
                 use rand::prelude::*;
                 use rand_xoshiro::Xoshiro256PlusPlus;
                 let mut shuffled = values.to_vec();
-                let mut rng = Xoshiro256PlusPlus::seed_from_u64(0xDEAD_BEEF_CAFE_BABE);
+                let mut rng = match seed {
+                    Some(s) => Xoshiro256PlusPlus::seed_from_u64(*s),
+                    None => Xoshiro256PlusPlus::seed_from_u64(rand::random::<u64>()),
+                };
                 shuffled.shuffle(&mut rng);
                 shuffled
             }
@@ -623,7 +648,7 @@ mod tests {
         let values = vec!["alice".to_string(), "bob".to_string()];
         let result = Anonymizer::anonymize_column(
             &values,
-            &AnonymizationMethod::Pseudonymize { salt: "test_salt".to_string() },
+            &AnonymizationMethod::Pseudonymize { secret_key: "test_secret".to_string() },
         );
         assert!(result.iter().all(|v| v.starts_with("pseudo_")));
         assert_ne!(result[0], result[1]);
@@ -831,7 +856,7 @@ mod tests {
             "alice".to_string(), "bob".to_string(), "charlie".to_string(),
             "dave".to_string(), "eve".to_string(),
         ];
-        let result = Anonymizer::anonymize_column(&values, &AnonymizationMethod::Randomize);
+        let result = Anonymizer::anonymize_column(&values, &AnonymizationMethod::Randomize { seed: Some(42) });
         // Same length, same elements (just shuffled)
         assert_eq!(result.len(), values.len());
         let mut sorted_orig: Vec<_> = values.clone();
@@ -855,14 +880,47 @@ mod tests {
     #[test]
     fn test_anonymize_pseudonymize_deterministic() {
         let values = vec!["alice".to_string()];
-        let method = AnonymizationMethod::Pseudonymize { salt: "s1".to_string() };
+        let method = AnonymizationMethod::Pseudonymize { secret_key: "s1".to_string() };
         let r1 = Anonymizer::anonymize_column(&values, &method);
         let r2 = Anonymizer::anonymize_column(&values, &method);
-        assert_eq!(r1, r2); // Same input + salt => same output
+        assert_eq!(r1, r2); // Same input + key => same output
 
-        let method2 = AnonymizationMethod::Pseudonymize { salt: "s2".to_string() };
+        let method2 = AnonymizationMethod::Pseudonymize { secret_key: "s2".to_string() };
         let r3 = Anonymizer::anonymize_column(&values, &method2);
-        assert_ne!(r1, r3); // Different salt => different output
+        assert_ne!(r1, r3); // Different key => different output
+    }
+
+    #[test]
+    fn test_anonymize_pseudonymize_full_hmac_output() {
+        // Full HMAC-SHA256 hex output (32 bytes = 64 hex chars), not a
+        // truncated 48-bit hash, so it isn't feasible to brute-force over
+        // the full output space.
+        let values = vec!["bob".to_string()];
+        let result = Anonymizer::anonymize_column(
+            &values,
+            &AnonymizationMethod::Pseudonymize { secret_key: "secret".to_string() },
+        );
+        let hex_part = result[0].strip_prefix("pseudo_").unwrap();
+        assert_eq!(hex_part.len(), 64);
+    }
+
+    #[test]
+    fn test_anonymize_randomize_default_seed_is_not_hardcoded() {
+        // Two default-seeded (entropy-seeded) shuffles of a large-enough
+        // input should not reliably produce the same permutation, unlike
+        // the old hardcoded-seed implementation.
+        let values: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        let r1 = Anonymizer::anonymize_column(&values, &AnonymizationMethod::Randomize { seed: None });
+        let r2 = Anonymizer::anonymize_column(&values, &AnonymizationMethod::Randomize { seed: None });
+        assert_ne!(r1, r2, "entropy-seeded shuffles should not be deterministic across calls");
+    }
+
+    #[test]
+    fn test_anonymize_randomize_explicit_seed_is_reproducible() {
+        let values: Vec<String> = (0..10).map(|i| i.to_string()).collect();
+        let r1 = Anonymizer::anonymize_column(&values, &AnonymizationMethod::Randomize { seed: Some(7) });
+        let r2 = Anonymizer::anonymize_column(&values, &AnonymizationMethod::Randomize { seed: Some(7) });
+        assert_eq!(r1, r2, "an explicit seed must still be reproducible for testing");
     }
 
     // --- k-anonymity extended tests ---

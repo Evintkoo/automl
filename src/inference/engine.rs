@@ -145,6 +145,7 @@ impl InferenceEngine {
         preprocessor_path: Option<&str>,
         model_path: &str,
     ) -> Result<Self> {
+        config.validate()?;
         let mut engine = Self::new(config);
 
         if let Some(path) = preprocessor_path {
@@ -509,7 +510,9 @@ impl InferenceEngine {
         }
 
         let model = self.model.as_ref().ok_or(AutoMLError::ModelNotFitted)?;
-        let chunk_size = self.config.stream_chunk_size;
+        // Defensive clamp: guard against a misconfigured/deserialized config with
+        // stream_chunk_size == 0, which would otherwise panic on division below.
+        let chunk_size = self.config.stream_chunk_size.max(1);
         let n_chunks = (df.height() + chunk_size - 1) / chunk_size;
 
         Ok((0..n_chunks).map(move |i| {
@@ -588,7 +591,9 @@ impl InferenceEngine {
     fn predict_batched(&self, df: &DataFrame, model: &TrainEngine) -> Result<Array1<f64>> {
         let n_rows = df.height();
         let n_cols = df.width();
-        let batch_size = self.adaptive_batch_size(n_rows, n_cols);
+        // Defensive clamp: adaptive_batch_size can return 0 when config.batch_size == 0
+        // (e.g. a deserialized config that skipped validation); avoid division by zero.
+        let batch_size = self.adaptive_batch_size(n_rows, n_cols).max(1);
         let n_batches = (n_rows + batch_size - 1) / batch_size;
 
         let mut all_predictions = Vec::with_capacity(n_rows);
@@ -609,7 +614,8 @@ impl InferenceEngine {
     fn predict_parallel(&self, df: &DataFrame, model: &TrainEngine) -> Result<Array1<f64>> {
         let n_rows = df.height();
         let n_cols = df.width();
-        let batch_size = self.adaptive_batch_size(n_rows, n_cols);
+        // Defensive clamp: see predict_batched for rationale.
+        let batch_size = self.adaptive_batch_size(n_rows, n_cols).max(1);
         let n_batches = (n_rows + batch_size - 1) / batch_size;
 
         // Configure rayon thread pool size if specified

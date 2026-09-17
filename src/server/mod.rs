@@ -97,6 +97,23 @@ pub async fn run_server(config: ServerConfig) -> anyhow::Result<()> {
     // Restore previously-trained models from disk so they survive server restarts
     crate::server::state::restore_models_from_disk(&config.models_dir, &state.models);
 
+    // Periodically evict stale jobs/train-engines/insights/studies so long-running
+    // servers don't grow memory unbounded. `evict_stale_entries()` previously existed
+    // but was never invoked anywhere; wire it up as a background task for the lifetime
+    // of the server.
+    {
+        let eviction_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
+            // The first tick fires immediately; skip it so we don't evict right at startup.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                eviction_state.evict_stale_entries().await;
+            }
+        });
+    }
+
     let app = create_router(state, &config);
 
     let addr: SocketAddr = format!("{}:{}", config.host, config.port).parse()?;

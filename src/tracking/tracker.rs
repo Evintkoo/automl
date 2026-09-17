@@ -107,7 +107,7 @@ impl Run {
     /// Get run duration in seconds
     pub fn duration_secs(&self) -> f64 {
         let end = self.end_time.unwrap_or_else(current_timestamp);
-        (end - self.start_time) as f64
+        end.saturating_sub(self.start_time) as f64
     }
 }
 
@@ -207,17 +207,26 @@ impl ExperimentTracker {
     /// Create or get an experiment
     pub fn create_experiment(&self, name: impl Into<String>) -> String {
         let name = name.into();
-        let experiment = Experiment::new(&name);
-        let experiment_id = experiment.experiment_id.clone();
-        
+        let mut experiment = Experiment::new(&name);
+
         if let Ok(mut experiments) = self.experiments.write() {
-            experiments.insert(experiment_id.clone(), experiment.clone());
+            // Guard against id collisions instead of silently overwriting an
+            // existing experiment via `insert`. `generate_experiment_id` is
+            // already collision-resistant (timestamp + random UUID-derived
+            // suffix), so this loop is a defensive fallback rather than the
+            // primary mechanism.
+            while experiments.contains_key(&experiment.experiment_id) {
+                experiment = Experiment::new(&name);
+            }
+            experiments.insert(experiment.experiment_id.clone(), experiment.clone());
         }
-        
+
+        let experiment_id = experiment.experiment_id.clone();
+
         if let Ok(mut current) = self.current_experiment.write() {
             *current = Some(experiment);
         }
-        
+
         experiment_id
     }
     
@@ -690,12 +699,27 @@ fn current_timestamp() -> u64 {
         .unwrap_or(0)
 }
 
+/// Short random suffix appended to timestamp-based ids so two ids generated
+/// within the same second (`current_timestamp` only has second resolution)
+/// don't collide. Backed by a UUID v4, so collisions are astronomically
+/// unlikely even under heavy concurrent creation. Matches the
+/// `uuid::Uuid::new_v4()`-derived short-id convention already used elsewhere
+/// in this crate (see `src/server/handlers.rs`).
+fn id_suffix() -> String {
+    uuid::Uuid::new_v4()
+        .to_string()
+        .split('-')
+        .next()
+        .unwrap_or("0")
+        .to_string()
+}
+
 fn generate_run_id() -> String {
-    format!("run_{}", current_timestamp())
+    format!("run_{}_{}", current_timestamp(), id_suffix())
 }
 
 fn generate_experiment_id() -> String {
-    format!("exp_{}", current_timestamp())
+    format!("exp_{}_{}", current_timestamp(), id_suffix())
 }
 
 #[cfg(test)]

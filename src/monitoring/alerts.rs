@@ -126,6 +126,11 @@ pub struct AlertManager {
 }
 
 impl AlertManager {
+    /// Maximum number of alert records retained in history before the
+    /// oldest entries are evicted, to prevent unbounded memory growth on a
+    /// long-running monitor with a flapping metric.
+    const MAX_HISTORY: usize = 1000;
+
     /// Create a new empty AlertManager
     pub fn new() -> Self {
         Self {
@@ -174,6 +179,10 @@ impl AlertManager {
                         metric_value: value,
                         message: message.clone(),
                     });
+                    if self.history.len() > Self::MAX_HISTORY {
+                        let excess = self.history.len() - Self::MAX_HISTORY;
+                        self.history.drain(0..excess);
+                    }
 
                     // Invoke handlers — borrow alert immutably via snapshot
                     for handler in &self.handlers {

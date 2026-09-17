@@ -260,7 +260,15 @@ fn build_lgb_tree(
     to_node(&nodes, 0, gradients, hessians, config.reg_lambda, config.reg_alpha)
 }
 
-fn goss_sample(gradients: &[f64], n: usize, top_rate: f64, other_rate: f64, rng: &mut Xoshiro256PlusPlus) -> Vec<usize> {
+/// GOSS (Gradient-based One-Side Sampling): keeps the top `top_rate` fraction of instances by
+/// |gradient| as-is, and randomly samples an `other_rate` fraction of the remaining
+/// (small-gradient) instances. Returns `(selected_indices, sampled_other_indices)` — the
+/// second element (a subset of the first) is the randomly-sampled small-gradient rows, which
+/// the caller must reweight by `(1 - top_rate) / other_rate` (see the `fit` methods below) to
+/// keep the gradient-sum estimate that drives split-finding unbiased. Without that
+/// compensation, GOSS silently biases every split toward under-counting the (much larger)
+/// population of small-gradient rows that got mostly dropped.
+fn goss_sample(gradients: &[f64], n: usize, top_rate: f64, other_rate: f64, rng: &mut Xoshiro256PlusPlus) -> (Vec<usize>, Vec<usize>) {
     let n_top = (n as f64 * top_rate).ceil() as usize;
     let n_other = (n as f64 * other_rate).ceil() as usize;
     let mut indices: Vec<usize> = (0..n).collect();
@@ -273,8 +281,9 @@ fn goss_sample(gradients: &[f64], n: usize, top_rate: f64, other_rate: f64, rng:
     let mut selected: Vec<usize> = indices[..n_top.min(n)].to_vec();
     let mut remaining: Vec<usize> = indices[n_top.min(n)..].to_vec();
     remaining.shuffle(rng);
-    selected.extend(remaining.iter().take(n_other));
-    selected
+    let sampled_other: Vec<usize> = remaining.drain(..n_other.min(remaining.len())).collect();
+    selected.extend(sampled_other.iter().copied());
+    (selected, sampled_other)
 }
 
 fn sigmoid(x: f64) -> f64 { 1.0 / (1.0 + (-x).exp()) }
@@ -302,11 +311,21 @@ impl LightGBMRegressor {
         let mut predictions = Array1::from_elem(n, self.base_prediction);
 
         for _ in 0..self.config.n_estimators {
-            let gradients: Vec<f64> = predictions.iter().zip(y.iter()).map(|(&p, &yi)| p - yi).collect();
-            let hessians: Vec<f64> = vec![1.0; n];
+            let mut gradients: Vec<f64> = predictions.iter().zip(y.iter()).map(|(&p, &yi)| p - yi).collect();
+            let mut hessians: Vec<f64> = vec![1.0; n];
 
             let indices = if self.config.top_rate + self.config.other_rate < 1.0 {
-                goss_sample(&gradients, n, self.config.top_rate, self.config.other_rate, &mut rng)
+                let (idx, sampled_other) = goss_sample(&gradients, n, self.config.top_rate, self.config.other_rate, &mut rng);
+                // Compensate the randomly-sampled small-gradient rows so the gradient/hessian
+                // sums split-finding relies on stay an unbiased estimate of the full dataset's.
+                if !sampled_other.is_empty() && self.config.other_rate > 0.0 {
+                    let factor = (1.0 - self.config.top_rate) / self.config.other_rate;
+                    for &i in &sampled_other {
+                        gradients[i] *= factor;
+                        hessians[i] *= factor;
+                    }
+                }
+                idx
             } else if self.config.subsample < 1.0 {
                 let k = (n as f64 * self.config.subsample).ceil() as usize;
                 let mut idx: Vec<usize> = (0..n).collect();
@@ -390,11 +409,20 @@ impl LightGBMClassifier {
 
         for _ in 0..self.config.n_estimators {
             let probs: Vec<f64> = raw.iter().map(|&r| sigmoid(r)).collect();
-            let gradients: Vec<f64> = probs.iter().zip(y.iter()).map(|(&p, &yi)| p - yi).collect();
-            let hessians: Vec<f64> = probs.iter().map(|&p| (p * (1.0 - p)).max(1e-16)).collect();
+            let mut gradients: Vec<f64> = probs.iter().zip(y.iter()).map(|(&p, &yi)| p - yi).collect();
+            let mut hessians: Vec<f64> = probs.iter().map(|&p| (p * (1.0 - p)).max(1e-16)).collect();
 
             let indices = if self.config.top_rate + self.config.other_rate < 1.0 {
-                goss_sample(&gradients, n, self.config.top_rate, self.config.other_rate, &mut rng)
+                let (idx, sampled_other) = goss_sample(&gradients, n, self.config.top_rate, self.config.other_rate, &mut rng);
+                // See the matching comment in LightGBMRegressor::fit.
+                if !sampled_other.is_empty() && self.config.other_rate > 0.0 {
+                    let factor = (1.0 - self.config.top_rate) / self.config.other_rate;
+                    for &i in &sampled_other {
+                        gradients[i] *= factor;
+                        hessians[i] *= factor;
+                    }
+                }
+                idx
             } else if self.config.subsample < 1.0 {
                 let k = (n as f64 * self.config.subsample).ceil() as usize;
                 let mut idx: Vec<usize> = (0..n).collect();

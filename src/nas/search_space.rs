@@ -328,17 +328,50 @@ pub struct NASSearchSpace {
 
 impl NASSearchSpace {
     /// Create new search space with config
-    pub fn new(config: SearchSpaceConfig) -> Self {
+    ///
+    /// # Errors
+    /// Returns an error if `min_hidden_dim > max_hidden_dim`, `hidden_dim_step == 0`
+    /// (which would panic inside `step_by`), or `min_layers > max_layers`. Any of
+    /// these leave `hidden_dims` empty or make `num_layer_choices` underflow, which
+    /// later panics when sampling (`gen_range` on an empty range) or attempts a
+    /// huge allocation in `NASController::new`.
+    pub fn new(config: SearchSpaceConfig) -> crate::error::Result<Self> {
+        if config.min_hidden_dim > config.max_hidden_dim {
+            return Err(crate::error::AutoMLError::InvalidParameter {
+                name: "min_hidden_dim".to_string(),
+                value: config.min_hidden_dim.to_string(),
+                reason: format!(
+                    "must be <= max_hidden_dim ({})",
+                    config.max_hidden_dim
+                ),
+            });
+        }
+        if config.hidden_dim_step == 0 {
+            return Err(crate::error::AutoMLError::InvalidParameter {
+                name: "hidden_dim_step".to_string(),
+                value: config.hidden_dim_step.to_string(),
+                reason: "must be >= 1".to_string(),
+            });
+        }
+        if config.min_layers > config.max_layers {
+            return Err(crate::error::AutoMLError::InvalidParameter {
+                name: "min_layers".to_string(),
+                value: config.min_layers.to_string(),
+                reason: format!("must be <= max_layers ({})", config.max_layers),
+            });
+        }
+
         let hidden_dims: Vec<usize> = (config.min_hidden_dim..=config.max_hidden_dim)
             .step_by(config.hidden_dim_step)
             .collect();
 
-        Self { config, hidden_dims }
+        Ok(Self { config, hidden_dims })
     }
 
     /// Create default search space for tabular data
     pub fn tabular() -> Self {
         Self::new(SearchSpaceConfig::default())
+            .expect("SearchSpaceConfig::default() must be a valid configuration")
     }
 
     /// Get number of operation choices
@@ -352,8 +385,13 @@ impl NASSearchSpace {
     }
 
     /// Get number of layer choices
+    ///
+    /// Defense in depth: `NASSearchSpace::new` already validates
+    /// `min_layers <= max_layers`, but guard the subtraction with
+    /// `saturating_sub` here too so this can never underflow/panic (debug)
+    /// or wrap to a huge value (release) if that invariant is ever bypassed.
     pub fn num_layer_choices(&self) -> usize {
-        self.config.max_layers - self.config.min_layers + 1
+        self.config.max_layers.saturating_sub(self.config.min_layers) + 1
     }
 
     /// Sample a random architecture

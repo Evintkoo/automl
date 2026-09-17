@@ -481,30 +481,68 @@ impl<T: Send + 'static> DynamicBatcher<T> {
         self.current_optimal_batch_size.store(new_size, Ordering::Relaxed);
     }
 
-    /// Get enhanced statistics including latency and request type info
+    /// Get enhanced statistics including latency and request type info.
+    ///
+    /// Acquires `inner` exactly once so the base stats (avg batch size/wait/processing
+    /// time) and the enhanced fields (latency percentiles, request-type distribution,
+    /// batch size history) are all read from the same consistent snapshot — previously
+    /// `stats()` took its own lock and then this method re-locked separately, so a
+    /// concurrent `form_batch`/`record_*` call in between could produce a response
+    /// mixing metrics from two different points in time.
     pub fn get_enhanced_stats(&self) -> EnhancedBatcherStats {
-        let base = self.stats();
+        let processed_batches = self.processed_batches.load(Ordering::Relaxed);
+        let processed_requests = self.processed_requests.load(Ordering::Relaxed);
 
-        let (request_type_distribution, avg_latency_ms, p95_latency_ms, p99_latency_ms, batch_size_history) =
-            self.inner.lock()
-                .map(|inner| {
-                    let dist = inner.request_type_counts.clone();
+        let (
+            avg_batch_size,
+            avg_wait_time_ms,
+            avg_processing_time_ms,
+            request_type_distribution,
+            avg_latency_ms,
+            p95_latency_ms,
+            p99_latency_ms,
+            batch_size_history,
+        ) = self.inner
+            .lock()
+            .map(|inner| {
+                let avg_batch_size = BatcherInner::avg_usize(&inner.batch_sizes);
+                let avg_wait_time_ms = BatcherInner::avg(&inner.batch_wait_times);
+                let avg_processing_time_ms = BatcherInner::avg(&inner.batch_processing_times);
 
-                    let (avg, p95, p99) = if inner.latency_history.is_empty() {
-                        (0.0, 0.0, 0.0)
-                    } else {
-                        let avg = inner.latency_history.iter().sum::<f64>() / inner.latency_history.len() as f64;
-                        let mut sorted = inner.latency_history.clone();
-                        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                        let p95_idx = ((sorted.len() as f64 * 0.95).ceil() as usize).min(sorted.len()) - 1;
-                        let p99_idx = ((sorted.len() as f64 * 0.99).ceil() as usize).min(sorted.len()) - 1;
-                        (avg, sorted[p95_idx], sorted[p99_idx])
-                    };
+                let dist = inner.request_type_counts.clone();
 
-                    let sizes: Vec<usize> = inner.batch_sizes.iter().copied().collect();
-                    (dist, avg, p95, p99, sizes)
-                })
-                .unwrap_or_default();
+                let (avg, p95, p99) = if inner.latency_history.is_empty() {
+                    (0.0, 0.0, 0.0)
+                } else {
+                    let avg = inner.latency_history.iter().sum::<f64>() / inner.latency_history.len() as f64;
+                    let mut sorted = inner.latency_history.clone();
+                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let p95_idx = ((sorted.len() as f64 * 0.95).ceil() as usize).min(sorted.len()) - 1;
+                    let p99_idx = ((sorted.len() as f64 * 0.99).ceil() as usize).min(sorted.len()) - 1;
+                    (avg, sorted[p95_idx], sorted[p99_idx])
+                };
+
+                let sizes: Vec<usize> = inner.batch_sizes.iter().copied().collect();
+                (avg_batch_size, avg_wait_time_ms, avg_processing_time_ms, dist, avg, p95, p99, sizes)
+            })
+            .unwrap_or_default();
+
+        let throughput = if avg_processing_time_ms > 0.0 {
+            (avg_batch_size * 1000.0) / avg_processing_time_ms
+        } else {
+            0.0
+        };
+
+        let base = BatcherStats {
+            processed_batches,
+            processed_requests,
+            max_observed_queue_size: self.max_observed_queue_size.load(Ordering::Relaxed),
+            avg_batch_size,
+            avg_wait_time_ms,
+            avg_processing_time_ms,
+            current_optimal_batch_size: self.current_optimal_batch_size.load(Ordering::Relaxed),
+            throughput,
+        };
 
         EnhancedBatcherStats {
             base,

@@ -141,27 +141,53 @@ where
         None
     }
     
-    /// Set a value in the cache (goes to L3 by default)
+    /// Set a value in the cache (goes to L3 by default).
+    /// Invalidates the key at the other levels so a subsequent `get()` can
+    /// never return a stale value from a level that wasn't updated.
     pub fn set(&self, key: K, value: V) {
+        self.l1.remove(&key);
+        self.l2.remove(&key);
         self.l3.set(key, value);
     }
-    
-    /// Set a value at a specific cache level
+
+    /// Set a value at a specific cache level.
+    /// Invalidates the key at the other levels so a subsequent `get()` can
+    /// never return a stale value from a level that wasn't updated.
     pub fn set_at_level(&self, key: K, value: V, level: CacheLevel) {
         match level {
-            CacheLevel::L1 => self.l1.set(key, value),
-            CacheLevel::L2 => self.l2.set(key, value),
-            CacheLevel::L3 => self.l3.set(key, value),
+            CacheLevel::L1 => {
+                self.l2.remove(&key);
+                self.l3.remove(&key);
+                self.l1.set(key, value);
+            }
+            CacheLevel::L2 => {
+                self.l1.remove(&key);
+                self.l3.remove(&key);
+                self.l2.set(key, value);
+            }
+            CacheLevel::L3 => {
+                self.l1.remove(&key);
+                self.l2.remove(&key);
+                self.l3.set(key, value);
+            }
         }
     }
-    
-    /// Set a value as hot (L1)
+
+    /// Set a value as hot (L1).
+    /// Invalidates the key at the other levels so a subsequent `get()` can
+    /// never return a stale value from a level that wasn't updated.
     pub fn set_hot(&self, key: K, value: V) {
+        self.l2.remove(&key);
+        self.l3.remove(&key);
         self.l1.set(key, value);
     }
-    
-    /// Set a value as warm (L2)
+
+    /// Set a value as warm (L2).
+    /// Invalidates the key at the other levels so a subsequent `get()` can
+    /// never return a stale value from a level that wasn't updated.
     pub fn set_warm(&self, key: K, value: V) {
+        self.l1.remove(&key);
+        self.l3.remove(&key);
         self.l2.set(key, value);
     }
     

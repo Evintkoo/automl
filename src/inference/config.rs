@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::{AutoMLError, Result};
+
 /// Quantization type for model optimization
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum QuantizationType {
@@ -132,6 +134,25 @@ impl InferenceConfig {
     pub fn with_probabilities(mut self) -> Self {
         self.output_probabilities = true;
         self
+    }
+
+    /// Validate the configuration, returning a clear error for values that would
+    /// otherwise cause a division-by-zero panic downstream (e.g. `batch_size` or
+    /// `stream_chunk_size` of 0). This is important because `InferenceConfig`
+    /// derives `Deserialize`, so a config loaded from disk or over the wire could
+    /// otherwise carry invalid values straight into the inference engine.
+    pub fn validate(&self) -> Result<()> {
+        if self.batch_size == 0 {
+            return Err(AutoMLError::ConfigError(
+                "InferenceConfig.batch_size must be greater than 0".to_string(),
+            ));
+        }
+        if self.stream_chunk_size == 0 {
+            return Err(AutoMLError::ConfigError(
+                "InferenceConfig.stream_chunk_size must be greater than 0".to_string(),
+            ));
+        }
+        Ok(())
     }
 }
 

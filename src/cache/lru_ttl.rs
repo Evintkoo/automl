@@ -280,10 +280,14 @@ where
         inner.remove_entry(key)
     }
 
-    /// Check if a key exists in the cache
+    /// Check if a key exists in the cache and has not expired
     pub fn contains(&self, key: &K) -> bool {
         self.inner.read()
-            .map(|g| g.cache.contains_key(key))
+            .map(|g| {
+                g.cache.get(key)
+                    .map(|(_, entry)| !entry.is_expired(self.ttl))
+                    .unwrap_or(false)
+            })
             .unwrap_or(false)
     }
 

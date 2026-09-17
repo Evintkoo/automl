@@ -2,6 +2,27 @@ use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::fs;
 
+/// Certificate expiry/validity status. Since this crate does not depend on an X.509
+/// parsing library (e.g. `x509-parser`), we cannot cryptographically determine real
+/// expiry from the certificate bytes. `Unknown` is the fail-closed result for that case:
+/// callers MUST treat `Unknown` the same as `Expired`/invalid (never as healthy), rather
+/// than assuming a certificate is fine just because it couldn't be checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExpiryStatus {
+    Valid,
+    Expired,
+    /// Could not be determined - no X.509 parser available. Treat as invalid/expired.
+    Unknown,
+}
+
+impl ExpiryStatus {
+    /// True unless the status is definitively `Valid`. Use this instead of matching only
+    /// on `Expired`, so callers fail closed on `Unknown` too.
+    pub fn should_treat_as_invalid(&self) -> bool {
+        !matches!(self, ExpiryStatus::Valid)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CertificateInfo {
     pub subject: String,
@@ -9,7 +30,8 @@ pub struct CertificateInfo {
     pub not_before: String,
     pub not_after: String,
     pub serial_number: String,
-    pub is_expired: bool,
+    /// Fail-closed status - see [`ExpiryStatus`]. `Unknown` must be treated as invalid.
+    pub expiry_status: ExpiryStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,8 +77,14 @@ impl TlsManager {
         Self { config }
     }
 
-    /// Validates a certificate file exists and parses basic PEM info.
-    /// Full X.509 parsing would require a dedicated crate like `x509-parser`.
+    /// Validates that a certificate file exists and looks like PEM-encoded data.
+    ///
+    /// NOTE: This crate has no X.509 parsing dependency (e.g. `x509-parser`), so this
+    /// cannot actually parse the certificate's subject/issuer/validity window. Those
+    /// fields are therefore reported as unknown and `expiry_status` is always
+    /// `ExpiryStatus::Unknown` on success, which callers MUST treat as
+    /// invalid/unverified (fail closed) - never as "certificate is healthy". A real
+    /// implementation needs a proper X.509 parsing crate as a follow-up.
     pub fn validate_certificate(&self, cert_path: &str) -> Result<CertificateInfo, String> {
         let content = fs::read_to_string(cert_path)
             .map_err(|e| format!("Failed to read certificate: {}", e))?;
@@ -65,22 +93,32 @@ impl TlsManager {
             return Err("Invalid certificate format: missing PEM header".to_string());
         }
 
-        // Basic PEM validation — full parsing requires x509-parser
+        // Basic PEM presence check only — no real X.509 parsing is performed, so we
+        // cannot claim to know the certificate's actual validity. Fail closed.
         Ok(CertificateInfo {
-            subject: "CN=localhost".to_string(),
-            issuer: "CN=localhost".to_string(),
+            subject: "N/A (requires x509-parser for full parsing)".to_string(),
+            issuer: "N/A (requires x509-parser for full parsing)".to_string(),
             not_before: "N/A (requires x509-parser for full parsing)".to_string(),
             not_after: "N/A (requires x509-parser for full parsing)".to_string(),
             serial_number: "N/A".to_string(),
-            is_expired: false,
+            expiry_status: ExpiryStatus::Unknown,
         })
     }
 
-    /// Returns days until certificate expiry. Requires x509-parser for real implementation.
+    /// Returns days until certificate expiry. Requires a real X.509 parser to compute;
+    /// since we don't have one, this fails closed with an explicit error rather than
+    /// fabricating a "365 days remaining" answer. Callers MUST treat an `Err` here as
+    /// "cannot verify -> treat certificate as invalid/expired", not as healthy.
     pub fn check_expiry(&self, cert_path: &str) -> Result<i64, String> {
-        let _info = self.validate_certificate(cert_path)?;
-        // Placeholder: full implementation needs x509-parser crate
-        Ok(365)
+        let info = self.validate_certificate(cert_path)?;
+        match info.expiry_status {
+            ExpiryStatus::Valid => Ok(365),
+            ExpiryStatus::Expired | ExpiryStatus::Unknown => Err(
+                "Cannot verify certificate expiry: no X.509 parser available (requires \
+                 x509-parser crate). Treating certificate as invalid/expired (fail closed)."
+                    .to_string(),
+            ),
+        }
     }
 
     pub fn get_security_headers(&self) -> HashMap<String, String> {

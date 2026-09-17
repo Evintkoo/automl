@@ -52,10 +52,24 @@ fn sanitize_filename(name: &str) -> String {
     }
 }
 
-/// Maximum upload body size (100 MB)
+/// Maximum upload body size (100 MB). This is checked against the raw/compressed
+/// bytes *before* any parsing is attempted (see `upload_data`/`import_from_url`), so a
+/// request can't force an unbounded amount of parsing work purely by virtue of a huge
+/// wire payload.
 const MAX_UPLOAD_SIZE: usize = 100 * 1024 * 1024;
 
-/// Validate dataset dimensions are within safe limits.
+/// Maximum estimated in-memory size of a parsed DataFrame (1 GB). Row/column count
+/// limits alone don't stop a decompression-bomb style payload: a small, highly
+/// compressible file (e.g. Parquet/Excel, which are internally compressed) can still be
+/// well under `MAX_UPLOAD_SIZE`/the URL-import byte cap on the wire yet expand to many
+/// GB once fully parsed into memory. This is checked immediately after parsing,
+/// alongside the row/column checks, as defense in depth (raw-byte caps alone are not
+/// sufficient against compression amplification).
+const MAX_DATASET_MEMORY_BYTES: usize = 1024 * 1024 * 1024;
+
+/// Validate dataset dimensions and estimated memory footprint are within safe limits.
+/// Callers should invoke this as early as possible after parsing (before storing,
+/// cloning, or otherwise retaining the DataFrame) to bound decompression-bomb style OOM.
 fn validate_dataset_size(df: &DataFrame) -> Result<()> {
     if df.height() > MAX_DATASET_ROWS {
         return Err(ServerError::BadRequest(format!(
@@ -65,6 +79,15 @@ fn validate_dataset_size(df: &DataFrame) -> Result<()> {
     if df.width() > MAX_DATASET_COLUMNS {
         return Err(ServerError::BadRequest(format!(
             "Too many columns: {} (max {})", df.width(), MAX_DATASET_COLUMNS
+        )));
+    }
+    let estimated_bytes = df.estimated_size();
+    if estimated_bytes > MAX_DATASET_MEMORY_BYTES {
+        return Err(ServerError::BadRequest(format!(
+            "Dataset too large in memory: ~{} MB (max {} MB). This can happen with highly \
+             compressed source files (Parquet/Excel) that expand significantly once parsed.",
+            estimated_bytes / 1024 / 1024,
+            MAX_DATASET_MEMORY_BYTES / 1024 / 1024
         )));
     }
     Ok(())
@@ -108,6 +131,31 @@ fn parse_model_type(s: &str) -> std::result::Result<ModelType, ServerError> {
             s
         ))),
     }
+}
+
+/// Build an identity fingerprint for a training-style job from its dataset id and
+/// request body, used to detect an identical in-flight request (e.g. a client retry
+/// after a timeout, or a double-click) before spawning a duplicate expensive run.
+///
+/// `kind` namespaces the fingerprint per handler (e.g. "train", "hyperopt") so
+/// otherwise-identical bodies submitted to different endpoints never collide.
+fn compute_job_fingerprint(kind: &str, dataset_id: Option<&str>, request_json: &serde_json::Value) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    dataset_id.unwrap_or("").hash(&mut hasher);
+    request_json.to_string().hash(&mut hasher);
+    format!("{}:{:x}", kind, hasher.finish())
+}
+
+/// Look for an already-running (Pending/Running) job with the given fingerprint. If
+/// found, callers should return its status instead of spawning a duplicate job.
+async fn find_in_flight_job_by_fingerprint(state: &AppState, fingerprint: &str) -> Option<TrainingJob> {
+    state.jobs.read().await.values()
+        .find(|j| {
+            j.fingerprint.as_deref() == Some(fingerprint)
+                && matches!(j.status, JobStatus::Pending | JobStatus::Running { .. })
+        })
+        .cloned()
 }
 
 // ============================================================================
@@ -181,16 +229,24 @@ pub async fn upload_data(
 #[derive(Deserialize)]
 pub struct PreviewQuery {
     rows: Option<usize>,
+    /// Which dataset to preview. Defaults to the current/most-recently-stored dataset
+    /// when omitted, preserving prior behavior for callers that don't track ids.
+    dataset_id: Option<String>,
+}
+
+/// Shared query struct for GET endpoints that operate on a dataset but take no other
+/// query parameters. Defaults to the current dataset when `dataset_id` is omitted.
+#[derive(Deserialize)]
+pub struct DatasetIdQuery {
+    dataset_id: Option<String>,
 }
 
 pub async fn get_data_preview(
     State(state): State<Arc<AppState>>,
     Query(query): Query<PreviewQuery>,
 ) -> Result<Json<serde_json::Value>> {
-    let data = state.current_data.read().await;
-    
-    let df = data.as_ref()
-        .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?;
+    let df = state.resolve_dataset(query.dataset_id.as_deref()).await?;
+    let df = &df;
 
     let n_rows = query.rows.unwrap_or(10).min(100);
     let preview = df.head(Some(n_rows));
@@ -229,18 +285,19 @@ pub async fn get_data_preview(
 pub async fn clear_data(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<serde_json::Value>> {
-    let mut data = state.current_data.write().await;
-    *data = None;
+    // Unset the "current" pointer only — previously-stored datasets (and their
+    // metadata) are left in place; this mirrors the old behavior of just wiping the
+    // single working buffer, not deleting anything from the `datasets` registry.
+    *state.current_dataset_id.write().await = None;
     Ok(Json(serde_json::json!({ "success": true })))
 }
 
 pub async fn get_data_info(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<DatasetIdQuery>,
 ) -> Result<Json<serde_json::Value>> {
-    let data = state.current_data.read().await;
-    
-    let df = data.as_ref()
-        .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?;
+    let df = state.resolve_dataset(query.dataset_id.as_deref()).await?;
+    let df = &df;
 
     let columns: Vec<serde_json::Value> = df.get_columns().iter().map(|col| {
         let null_count = col.null_count();
@@ -267,16 +324,9 @@ pub async fn get_data_info(
 /// Comprehensive automated data analysis
 pub async fn analyze_data(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<DatasetIdQuery>,
 ) -> Result<Json<serde_json::Value>> {
-    // Clone the DataFrame and immediately drop the read lock.
-    // This prevents blocking writers for the full duration of CPU-intensive analysis.
-    let df = {
-        let data = state.current_data.read().await;
-        data.as_ref()
-            .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?
-            .clone()   // DataFrame clone (reference-counted column buffers)
-    };
-    // `data` guard dropped here — lock released
+    let df = state.resolve_dataset(query.dataset_id.as_deref()).await?;
 
     let n_rows = df.height();
     let n_cols = df.width();
@@ -672,39 +722,57 @@ pub struct PreprocessRequest {
     imputation: Option<String>,
     #[allow(dead_code)]
     target_column: Option<String>,
+    /// Which dataset to preprocess. Defaults to the current dataset when omitted.
+    dataset_id: Option<String>,
+}
+
+/// Parse a scaler name into a `ScalerType`, rejecting unrecognized values with a 400
+/// instead of silently falling through to `ScalerType::None` — consistent with
+/// `parse_task_type`/`parse_model_type` elsewhere in this file.
+fn parse_scaler_type(s: &str) -> std::result::Result<ScalerType, ServerError> {
+    match s {
+        "none" => Ok(ScalerType::None),
+        "standard" => Ok(ScalerType::Standard),
+        "minmax" => Ok(ScalerType::MinMax),
+        "robust" => Ok(ScalerType::Robust),
+        _ => Err(ServerError::BadRequest(format!(
+            "Invalid scaler: '{}'. Expected: none, standard, minmax, robust", s
+        ))),
+    }
+}
+
+/// Parse an imputation strategy name, rejecting unrecognized values with a 400 instead
+/// of silently falling through to `ImputeStrategy::Drop`.
+fn parse_impute_strategy(s: &str) -> std::result::Result<ImputeStrategy, ServerError> {
+    match s {
+        "drop" => Ok(ImputeStrategy::Drop),
+        "mean" => Ok(ImputeStrategy::Mean),
+        "median" => Ok(ImputeStrategy::Median),
+        "mode" => Ok(ImputeStrategy::MostFrequent),
+        _ => Err(ServerError::BadRequest(format!(
+            "Invalid imputation strategy: '{}'. Expected: drop, mean, median, mode", s
+        ))),
+    }
 }
 
 pub async fn run_preprocessing(
     State(state): State<Arc<AppState>>,
     Json(request): Json<PreprocessRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    // Read and clone data, then drop lock before CPU-bound processing
-    let df = {
-        let data = state.current_data.read().await;
-        data.as_ref()
-            .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?
-            .clone()
-    };
+    // Resolve which dataset to operate on (explicit dataset_id, or the current one),
+    // and keep the id around so the transformed result can be written back to the
+    // same dataset rather than a shared single-buffer slot.
+    let (dataset_id, df) = state.resolve_dataset_with_id(request.dataset_id.as_deref()).await?;
 
     // Build preprocessing config
     let mut config = PreprocessingConfig::default();
 
     if let Some(scaler) = &request.scaler {
-        config = config.with_scaler(match scaler.as_str() {
-            "standard" => ScalerType::Standard,
-            "minmax" => ScalerType::MinMax,
-            "robust" => ScalerType::Robust,
-            _ => ScalerType::None,
-        });
+        config = config.with_scaler(parse_scaler_type(scaler)?);
     }
 
     if let Some(imputation) = &request.imputation {
-        config = config.with_numeric_impute(match imputation.as_str() {
-            "mean" => ImputeStrategy::Mean,
-            "median" => ImputeStrategy::Median,
-            "mode" => ImputeStrategy::MostFrequent,
-            _ => ImputeStrategy::Drop,
-        });
+        config = config.with_numeric_impute(parse_impute_strategy(imputation)?);
     }
 
     // Run preprocessing (lock is not held)
@@ -712,8 +780,8 @@ pub async fn run_preprocessing(
     let processed = preprocessor.fit_transform(&df)
         .map_err(|e| ServerError::Internal(format!("Preprocessing failed: {:?}", e)))?;
 
-    // Re-acquire write lock to update state
-    *state.current_data.write().await = Some(processed.clone());
+    // Write the transformed data back to the dataset it came from.
+    state.update_dataset_frame(&dataset_id, processed.clone()).await;
     *state.preprocessor.write().await = Some(preprocessor);
 
     Ok(Json(serde_json::json!({
@@ -747,25 +815,40 @@ pub struct TrainRequest {
     test_size: Option<f64>,
     #[allow(dead_code)]
     hyperparameters: Option<serde_json::Value>,
+    /// Which dataset to train on. Defaults to the current dataset when omitted.
+    dataset_id: Option<String>,
 }
 
 pub async fn start_training(
     State(state): State<Arc<AppState>>,
     Json(request): Json<TrainRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    let data = state.current_data.read().await;
-    
-    let df = data.as_ref()
-        .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?
-        .clone();
+    let (dataset_id, df) = state.resolve_dataset_with_id(request.dataset_id.as_deref()).await?;
 
     let task_type = parse_task_type(&request.task_type)?;
     let model_type = parse_model_type(&request.model_type)?;
 
+    // Idempotency: dedupe on (dataset_id, target_column, task_type, model_type) so a
+    // client retry after a timeout, or a double-click, doesn't launch a second
+    // duplicate (and expensive) training run.
+    let fingerprint = compute_job_fingerprint("train", Some(&dataset_id), &serde_json::json!({
+        "target_column": request.target_column,
+        "task_type": request.task_type,
+        "model_type": request.model_type,
+    }));
+    if let Some(existing) = find_in_flight_job_by_fingerprint(&state, &fingerprint).await {
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "job_id": existing.id,
+            "message": "An identical training job is already in progress",
+            "deduplicated": true,
+        })));
+    }
+
     // Create job ID
     let job_id = AppState::generate_id();
     let job_id_for_response = job_id.clone();
-    
+
     info!(
         job_id = %job_id,
         model = %request.model_type,
@@ -777,8 +860,8 @@ pub async fn start_training(
     // Store job
     let job = TrainingJob {
         id: job_id.clone(),
-        status: JobStatus::Running { 
-            progress: 0.0, 
+        status: JobStatus::Running {
+            progress: 0.0,
             message: "Starting training...".to_string(),
             partial_results: None,
         },
@@ -789,6 +872,7 @@ pub async fn start_training(
         }),
         created_at: chrono::Utc::now(),
         model_path: None,
+        fingerprint: Some(fingerprint),
     };
     state.jobs.write().await.insert(job_id.clone(), job);
 
@@ -798,8 +882,9 @@ pub async fn start_training(
     let model_type_name = request.model_type.clone();
     let task_type_name = request.task_type.clone();
     let models_dir = state.config.models_dir.clone();
-    
-    tokio::spawn(async move {
+    let job_id_for_handle = job_id.clone();
+
+    let handle = tokio::spawn(async move {
         let start = std::time::Instant::now();
         let task_type_for_insights = task_type.clone();
         let result = run_training_job(
@@ -850,8 +935,16 @@ pub async fn start_training(
                 let engine_for_insights = engine.clone();
                 state_clone.train_engines.insert(model_id.clone(), engine);
 
-                // Populate evaluation cache for Metrics Deep Dive
-                if let Some(df) = state_clone.current_data.read().await.as_ref() {
+                // Populate evaluation cache for Metrics Deep Dive.
+                //
+                // Use the DataFrame this job was actually trained on (`df`, captured
+                // when the job was created) rather than re-reading "whatever is
+                // current" from shared state — a concurrent upload/import that lands
+                // while this job is training would otherwise silently swap in a
+                // different dataset here, corrupting the evaluation cache with
+                // predictions run against the wrong data.
+                {
+                    let df = &df;
                     use crate::server::state::InsightsEvaluation;
                     use crate::training::TaskType;
 
@@ -931,6 +1024,7 @@ pub async fn start_training(
             }
         }
     });
+    state.job_handles.insert(job_id_for_handle, handle);
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -1085,6 +1179,13 @@ async fn run_training_job(
 /// Max concurrent model trainings to prevent OOM on small machines
 const MAX_PARALLEL_TRAINS: usize = 4;
 
+/// Max number of models a single comparison/ensemble request may list. Without this,
+/// a `models: Vec<String>` with an enormous number of entries would cause one
+/// `tokio::spawn` (each cloning the full DataFrame) to be queued per entry *before* the
+/// `MAX_PARALLEL_TRAINS` semaphore has a chance to throttle anything, exhausting memory
+/// and CPU. Validate the length up front and reject oversized requests before spawning.
+const MAX_MODELS_PER_REQUEST: usize = 50;
+
 pub async fn get_training_status(
     State(state): State<Arc<AppState>>,
     Path(job_id): Path<String>,
@@ -1109,17 +1210,23 @@ pub struct CompareRequest {
     models: Vec<String>,
     #[allow(dead_code)]
     cv_folds: Option<usize>,
+    /// Which dataset to compare models on. Defaults to the current dataset when omitted.
+    dataset_id: Option<String>,
 }
 
 pub async fn compare_models(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CompareRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    let data = state.current_data.read().await;
-    
-    let df = data.as_ref()
-        .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?
-        .clone();
+    if request.models.len() > MAX_MODELS_PER_REQUEST {
+        return Err(ServerError::BadRequest(format!(
+            "Too many models requested: {} (max {})",
+            request.models.len(),
+            MAX_MODELS_PER_REQUEST
+        )));
+    }
+
+    let df = state.resolve_dataset(request.dataset_id.as_deref()).await?;
 
     let task_type = parse_task_type(&request.task_type)?;
 
@@ -1451,12 +1558,32 @@ pub async fn predict_batch(
     let x = ndarray::Array2::from_shape_vec((n_rows, n_cols), flat)
         .map_err(|e| ServerError::BadRequest(format!("Invalid data dimensions: {}", e)))?;
 
-    // Run batch prediction
+    // Run batch prediction — measure pure inference latency for SLO tracking, same as
+    // the single-row `predict` handler.
+    let t0 = std::time::Instant::now();
     let predictions = engine.predict_array(&x)
         .map_err(|e| ServerError::Internal(format!("Batch prediction failed: {}", e)))?;
+    let inference_us = t0.elapsed().as_micros() as u64;
 
     let cache_hit = engine.last_prediction_was_cached();
     let stats = engine.stats();
+
+    // OOD check using the stored detector, same as `predict` — aggregated as "any row
+    // in the batch is OOD" rather than hardcoding `false`, which previously made this
+    // signal meaningless for batch callers.
+    let ood_warning = state.ood_detectors.get(model_id.as_str())
+        .map(|detector| {
+            (0..x.nrows()).any(|i| {
+                x.row(i).as_slice().map(|row| detector.is_ood(row)).unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+    drop(engine); // release registry guard before further state access
+
+    // Record inference latency for SLO percentile tracking — `predict` does this but
+    // `predict_batch` previously never did, so batch traffic was invisible to SLO
+    // monitoring.
+    state.record_prediction_latency(inference_us);
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -1464,7 +1591,7 @@ pub async fn predict_batch(
         "count": predictions.len(),
         "cache_hit": cache_hit,
         "avg_latency_ms": stats.avg_latency_ms,
-        "ood_warning": false,
+        "ood_warning": ood_warning,
     })))
 }
 
@@ -2467,13 +2594,16 @@ const EMBEDDED_INDEX_HTML: &str = r#"<!DOCTYPE html>
     </div>
     <div id="e-toasts" class="toast-box"></div>
     <script>
-    var eData=null,eTraining=false,eLastModelId=null,eLoadedDataset=null;
+    var eData=null,eTraining=false,eLastModelId=null,eLoadedDataset=null,eModelGen=0;
+    var ePollTok={single:0,hyperopt:0,hoApply:0,autotune:0,ensemble:0};
     var eInsStNodes=[], eInsStEpochs=[], eInsStCurrent=0;
     var eInsStPlaying=false, eInsStTimer=null, eInsModelType='';
     var eInsPgDebounce=null, eInsPgFeatures={}, eInsPgColStats={}, eInsPgLastModel='';
     var eInsMetricsData=null, eInsMetricsThreshold=0.5;
     function $(i){return document.getElementById(i)}
     function eNotify(m,t){var d=document.createElement('div');d.className='toast'+(t==='ok'?' toast-ok':t==='err'?' toast-err':'');d.textContent=m;$('e-toasts').appendChild(d);setTimeout(function(){d.remove()},3500)}
+    function eCommitModel(id,gen,label){if(gen!==eModelGen)return;var prev=eLastModelId;eLastModelId=id;var explBtn=$('e-explain-btn');if(explBtn)explBtn.disabled=false;if(prev&&prev!==id){eNotify('Active model for Explainability / Insights / What-If switched to the '+label+' result','')}}
+    function ePollCancelAll(){ePollTok.single++;ePollTok.hyperopt++;ePollTok.hoApply++;ePollTok.autotune++;ePollTok.ensemble++;eCloseActiveUmap()}
     var eTabNames={dashboard:'Dashboard',data:'Data',train:'Train',analysis:'Analysis',insights:'Insights',reports:'Reports',monitor:'Monitor'};
     function eTab(n){
         document.querySelectorAll('.tab-panel').forEach(function(p){p.classList.remove('active')});
@@ -2482,6 +2612,7 @@ const EMBEDDED_INDEX_HTML: &str = r#"<!DOCTYPE html>
         var btn=document.querySelector('[data-tab="'+n+'"]');if(btn)btn.classList.add('active');
         $('e-page-title').textContent=eTabNames[n]||n;
         eUpdateNoDataAlerts();
+        if(n!=='train')ePollCancelAll();
         if(n==='reports')eLoadReport();
         if(n==='insights')eInsLoad();
     }
@@ -2491,6 +2622,13 @@ const EMBEDDED_INDEX_HTML: &str = r#"<!DOCTYPE html>
         document.querySelectorAll('.sidebar-subitem[data-parent="'+parent+'"]').forEach(function(t){t.classList.remove('active')});
         var sp=$('esp-'+parent+'-'+name);if(sp)sp.classList.add('active');
         var btn=document.querySelector('.sidebar-subitem[data-parent="'+parent+'"][data-name="'+name+'"]');if(btn)btn.classList.add('active');
+        if(parent==='train'){
+            if(name!=='single')ePollTok.single++;
+            if(name!=='hyperopt'){ePollTok.hyperopt++;ePollTok.hoApply++}
+            if(name!=='autotune')ePollTok.autotune++;
+            if(name!=='ensemble')ePollTok.ensemble++;
+            if(name!=='single'&&name!=='hyperopt')eCloseActiveUmap();
+        }
     }
     function eToggleSidebar(){var s=$('e-sidebar');s.classList.toggle('expanded');$('e-sidebar-icon').className=s.classList.contains('expanded')?'ri-arrow-left-s-line':'ri-arrow-right-s-line'}
     function eEffectiveTheme(){var t=document.documentElement.getAttribute('data-theme');if(t==='light'||t==='dark')return t;return(window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}
@@ -2522,7 +2660,7 @@ const EMBEDDED_INDEX_HTML: &str = r#"<!DOCTYPE html>
     function eEnableButtons(){$('e-train-btn').disabled=false;$('e-ho-btn').disabled=false;$('e-ens-btn').disabled=false;$('e-at-btn').disabled=false;$('e-anomaly-btn').disabled=false;$('e-dr-btn').disabled=false;ePopulateAtTarget()}
     function eShowDataInfo(d){
         var h='<div class="grid-2" style="margin-bottom:16px"><div style="text-align:center;padding:12px;background:#f0f0f0;border-radius:0"><span class="stat stat-info stat-animated">'+d.rows.toLocaleString()+'</span><p style="font-size:12px;color:#404040;margin-top:2px">Rows</p></div><div style="text-align:center;padding:12px;background:#f0f0f0;border-radius:0"><span class="stat stat-ok stat-animated">'+d.columns+'</span><p style="font-size:12px;color:#404040;margin-top:2px">Columns</p></div></div>';
-        h+='<div style="display:flex;flex-wrap:wrap;gap:4px">';(d.column_names||[]).forEach(function(c,i){var colors=['#121212','#404040','#6b6b6b','#121212','#121212','#121212'];var ci=colors[i%colors.length];h+='<span style="display:inline-flex;align-items:center;height:24px;padding:0 8px;font-size:11px;border-radius:0;background:'+ci+'11;color:'+ci+';font-weight:500">'+c+'</span>'});h+='</div>';
+        h+='<div style="display:flex;flex-wrap:wrap;gap:4px">';(d.column_names||[]).forEach(function(c,i){var colors=['#121212','#404040','#6b6b6b','#121212','#121212','#121212'];var ci=colors[i%colors.length];h+='<span style="display:inline-flex;align-items:center;height:24px;padding:0 8px;font-size:11px;border-radius:0;background:'+ci+'11;color:'+ci+';font-weight:500">'+escHtml(c)+'</span>'});h+='</div>';
         $('e-info').innerHTML=h;
     }
     function eShowDataPreview(d){
@@ -2530,8 +2668,8 @@ const EMBEDDED_INDEX_HTML: &str = r#"<!DOCTYPE html>
         if(!prev.length||!cols.length){$('e-data-preview-wrap').style.display='none';return}
         $('e-data-preview-wrap').style.display='block';
         $('e-preview-badge').textContent='First '+prev.length+' rows';
-        var h='<table><thead><tr>';cols.forEach(function(c){h+='<th>'+c+'</th>'});h+='</tr></thead><tbody>';
-        prev.forEach(function(row){h+='<tr>';cols.forEach(function(c){h+='<td class="mono" style="font-size:12px">'+(row[c]!=null?row[c]:'—')+'</td>'});h+='</tr>'});
+        var h='<table><thead><tr>';cols.forEach(function(c){h+='<th>'+escHtml(c)+'</th>'});h+='</tr></thead><tbody>';
+        prev.forEach(function(row){h+='<tr>';cols.forEach(function(c){h+='<td class="mono" style="font-size:12px">'+(row[c]!=null?escHtml(row[c]):'—')+'</td>'});h+='</tr>'});
         h+='</tbody></table>';$('e-data-preview').innerHTML=h;
     }
     function eFetchAndShowViz(){if(!eData)return;fetch('/api/data/preview?rows=100').then(function(r){return r.json()}).then(function(p){if(p.columns&&p.rows>0){var rows=[];for(var i=0;i<p.rows;i++){var row={};p.columns.forEach(function(c){row[c.name]=c.values[i]!=null?c.values[i]:null});rows.push(row)}eData.preview=rows}eShowDataPreview(eData);eShowDataViz(eData)}).catch(function(){eShowDataPreview(eData);eShowDataViz(eData)})}
@@ -2539,7 +2677,7 @@ const EMBEDDED_INDEX_HTML: &str = r#"<!DOCTYPE html>
         document.querySelectorAll('#e-pills .pill').forEach(function(p){p.classList.remove('active')});
         var btn=document.querySelector('#e-pills .pill[data-name="'+n+'"]');if(btn)btn.classList.add('active');
         fetch('/api/data/sample/'+n).then(function(r){return r.json()}).then(function(d){if(d.success){eData=d;eLoadedDataset=n;eTopbar(d.name||n,d.rows,d.columns);eShowDataInfo(d);ePopulateTargets(d.column_names);eEnableButtons();eUpdateAutoMLTarget();eUpdateDimRedColor();eUpdateNoDataAlerts();eRunAnalysis();eFetchAndShowViz();eNotify('Loaded '+n+' ('+d.rows+' rows, '+d.columns+' cols)','ok');eLogActivity('Loaded dataset: '+n+' ('+d.rows+' rows)')}}).catch(function(e){eNotify('Failed: '+e.message,'err')})}
-    function eImportUrl(){var url=$('e-import-url').value.trim();if(!url){eNotify('Enter a URL','err');return}$('e-import-status').innerHTML='<p style="font-size:12px;color:#404040">Downloading...</p>';fetch('/api/data/import/url',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url})}).then(function(r){return r.json()}).then(function(d){if(d.success){eData=d;eTopbar(d.name||'Imported',d.rows,d.columns);eShowDataInfo(d);ePopulateTargets(d.column_names);eEnableButtons();eUpdateAutoMLTarget();eUpdateNoDataAlerts();eRunAnalysis();eFetchAndShowViz();eUpdateDimRedColor();$('e-import-status').innerHTML='<p style="font-size:12px;color:#404040">Imported from '+d.source+' ('+d.rows+' rows, '+d.columns+' cols)</p>';eNotify('Imported!','ok')}else if(d.needs_credentials){$('e-import-status').innerHTML='<p style="font-size:12px;color:#6b6b6b">'+d.message+'</p>'}else{$('e-import-status').innerHTML='<p style="font-size:12px;color:#121212">'+(d.message||'Failed')+'</p>'}}).catch(function(e){$('e-import-status').innerHTML='<p style="font-size:12px;color:#121212">'+e.message+'</p>'})}
+    function eImportUrl(){var url=$('e-import-url').value.trim();if(!url){eNotify('Enter a URL','err');return}$('e-import-status').innerHTML='<p style="font-size:12px;color:#404040">Downloading...</p>';fetch('/api/data/import/url',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:url})}).then(function(r){return r.json()}).then(function(d){if(d.success){eData=d;eTopbar(d.name||'Imported',d.rows,d.columns);eShowDataInfo(d);ePopulateTargets(d.column_names);eEnableButtons();eUpdateAutoMLTarget();eUpdateNoDataAlerts();eRunAnalysis();eFetchAndShowViz();eUpdateDimRedColor();$('e-import-status').innerHTML='<p style="font-size:12px;color:#404040">Imported from '+escHtml(d.source)+' ('+d.rows+' rows, '+d.columns+' cols)</p>';eNotify('Imported!','ok')}else if(d.needs_credentials){$('e-import-status').innerHTML='<p style="font-size:12px;color:#6b6b6b">'+escHtml(d.message)+'</p>'}else{$('e-import-status').innerHTML='<p style="font-size:12px;color:#121212">'+escHtml(d.message||'Failed')+'</p>'}}).catch(function(e){$('e-import-status').innerHTML='<p style="font-size:12px;color:#121212">'+escHtml(e.message)+'</p>'})}
     function eFileUpload(input){
         if(!input.files||!input.files[0])return;
         var file=input.files[0];var fd=new FormData();fd.append('file',file);
@@ -2561,14 +2699,14 @@ const EMBEDDED_INDEX_HTML: &str = r#"<!DOCTYPE html>
     function eStepBar(steps,current){var h='<div class="tp-steps">';for(var i=0;i<steps.length;i++){var cls=i<current?'done':(i===current?'active':'');h+='<div class="tp-step '+cls+'"><div class="tp-dot"></div><div class="tp-label">'+steps[i]+'</div></div>'}return h+'</div>'}
     function ePopulateAtTarget(){var sel=$('e-at-target');if(!sel||!eData)return;sel.innerHTML='<option value="">Select...</option>';(eData.column_names||[]).forEach(function(c){var o=document.createElement('option');o.value=c;o.textContent=c;sel.appendChild(o)})}
     function eAtModelList(task){var cls=task==='classification'||task==='binary_classification'||task==='multi_classification';var reg=task==='regression'||task==='time_series';if(cls)return['Random Forest','XGBoost','LightGBM','CatBoost','Gradient Boosting','Extra Trees','AdaBoost','SGD','Decision Tree','KNN','Logistic Regression','SVM','Naive Bayes'];if(reg)return['Random Forest','XGBoost','LightGBM','CatBoost','Gradient Boosting','Extra Trees','Ridge','Lasso','Elastic Net','Polynomial','SGD','Gaussian Process','Decision Tree','KNN','Linear Regression'];return['KMeans','DBSCAN']}
-    function eTrain(){if(!eData||eTraining)return;if(!eValidateTarget())return;eTraining=true;eTrainStart=Date.now();$('e-train-btn').disabled=true;$('e-train-btn').innerHTML='<span class="spinner"></span> Training...';var model=$('e-model').options[$('e-model').selectedIndex].text;$('e-result').innerHTML='<div class="tp-card active"><div class="tp-header"><div class="tp-ring">'+eProgressRing(0.1,48)+'<div class="tp-ring-text">0%</div></div><div><div class="tp-phase">Training '+model+'</div><div class="tp-msg">Preparing data...</div><div class="tp-elapsed">0s</div></div></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:10%"></div></div>'+eStepBar(['Prepare','Split','Fit','Evaluate'],0)+'</div>';var cfg={target_column:$('e-target').value,task_type:$('e-task').value,model_type:$('e-model').value};fetch('/api/train',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(function(r){return r.json()}).then(function(d){if(d.job_id){ePoll(d.job_id)}}).catch(function(e){$('e-result').innerHTML='<p style="color:#121212">'+e.message+'</p>';eTraining=false;$('e-train-btn').disabled=false;$('e-train-btn').textContent='Train Model'})}
-    function ePoll(id){fetch('/api/train/status/'+id).then(function(r){return r.json()}).then(function(d){var s=d.status;if(s.Completed){var m=s.Completed.metrics||{};var h='<table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>';Object.keys(m).forEach(function(k){h+='<tr><td>'+k+'</td><td class="mono">'+(typeof m[k]==='number'?m[k].toFixed(4):m[k])+'</td></tr>'});h+='</tbody></table>';$('e-result').innerHTML=h;var modelName=$('e-model').options[$('e-model').selectedIndex].text;eDashTrainResult(modelName,m);eTraining=false;$('e-train-btn').disabled=false;$('e-train-btn').textContent='Train Model';eNotify('Training complete!','ok');eLogActivity('Training completed: '+modelName);eHistPush({type:'Single',model:modelName,metrics:m,target:$('e-target').value,task:$('e-task').value,ts:Date.now()});eDashModels();eShowTrainViz(m);fetch('/api/models').then(function(r){return r.json()}).then(function(md){var models=md.models||[];if(models.length>0){eLastModelId=models[models.length-1].id;$('e-explain-btn').disabled=false;eQualityFetch(eLastModelId,'e-quality-panel');var safeId=eLastModelId.replace(/[^a-zA-Z0-9_-]/g,'');var umapDiv=document.createElement('div');umapDiv.style.cssText='margin-top:16px';var barWrap=document.createElement('div');barWrap.id='umap-bwrap-'+safeId;barWrap.style.cssText='margin-bottom:4px';var barLabel=document.createElement('div');barLabel.style.cssText='font-size:11px;color:#404040;margin-bottom:2px';barLabel.textContent='Computing UMAP\u2026';barWrap.appendChild(barLabel);var barTrack=document.createElement('div');barTrack.style.cssText='height:3px;background:#1a1a1a;border-radius:0';var barFill=document.createElement('div');barFill.id='umap-bar-'+safeId;barFill.style.cssText='height:3px;background:#121212;border-radius:0;width:0%;transition:width .3s';barTrack.appendChild(barFill);barWrap.appendChild(barTrack);var wrapDiv=document.createElement('div');wrapDiv.id='umap-wrap-'+safeId;var canvas=document.createElement('canvas');canvas.id='umap-scatter-'+safeId;canvas.style.cssText='width:100%;height:280px;display:block;border-radius:0;background:#121212';wrapDiv.appendChild(canvas);umapDiv.appendChild(barWrap);umapDiv.appendChild(wrapDiv);$('e-result').appendChild(umapDiv);eStartUmap(eLastModelId)}}).catch(function(){})}else if(s.Failed){$('e-result').innerHTML='<p style="color:#121212">'+(s.Failed.error||'Failed')+'</p>';eTraining=false;$('e-train-btn').disabled=false;$('e-train-btn').textContent='Train Model';eLogActivity('Training failed: '+(s.Failed.error||'Unknown error'))}else{var p=s.Running?s.Running.progress||0:0;var msg=s.Running?s.Running.message||'':'';var pct=Math.round(p*100);var model=$('e-model').options[$('e-model').selectedIndex].text;var step=0;if(p>0.1)step=1;if(p>0.3)step=2;if(p>0.8)step=3;$('e-result').innerHTML='<div class="tp-card active"><div class="tp-header"><div class="tp-ring">'+eProgressRing(p,48)+'<div class="tp-ring-text">'+pct+'%</div></div><div><div class="tp-phase">Training '+model+'</div><div class="tp-msg">'+msg+'</div><div class="tp-elapsed">'+eElapsed(eTrainStart)+'</div></div></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:'+pct+'%"></div></div>'+eStepBar(['Prepare','Split','Fit','Evaluate'],step)+'</div>';setTimeout(function(){ePoll(id)},1000)}}).catch(function(){setTimeout(function(){ePoll(id)},2000)})}
-    function eHyperOpt(){if(!eData)return;if(!eValidateTarget())return;eHoStart=Date.now();$('e-ho-btn').disabled=true;$('e-ho-btn').innerHTML='<span class="spinner"></span> Optimizing...';var nTrials=parseInt($('e-ho-trials').value);$('e-ho-result').innerHTML='<div class="tp-card active"><div class="tp-header"><div class="tp-ring">'+eProgressRing(0,48,'#121212')+'<div class="tp-ring-text">0%</div></div><div><div class="tp-phase">Hyperparameter Optimization</div><div class="tp-msg">Starting '+nTrials+' trials...</div><div class="tp-elapsed">0s</div></div></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:0%;background:#121212"></div></div></div>';fetch('/api/hyperopt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target_column:$('e-target').value,task_type:$('e-task').value,model_type:$('e-ho-model').value,n_trials:nTrials,sampler:$('e-ho-sampler').value})}).then(function(r){return r.json()}).then(function(d){if(d.job_id){eHoPoll(d.job_id)}}).catch(function(e){$('e-ho-result').innerHTML='<p style="color:#121212">'+e.message+'</p>';$('e-ho-btn').disabled=false;$('e-ho-btn').textContent='Optimize'})}
-    function eHoPoll(id){fetch('/api/train/status/'+id).then(function(r){return r.json()}).then(function(d){var s=d.status;if(s.Completed){var m=s.Completed.metrics||{};var h='';if(m.best_trial){var bp=m.best_trial.params||{};var paramRows='';Object.keys(bp).forEach(function(k){var v=bp[k];paramRows+='<tr><td style="padding:3px 8px;color:#9ca3af;font-size:12px">'+escHtml(k)+'</td><td class="mono" style="padding:3px 8px;font-size:12px;color:#e5e7eb">'+(typeof v==='number'?v.toFixed(4):escHtml(String(v)))+'</td></tr>'});h+='<div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:0;padding:14px;margin-bottom:12px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><span style="font-size:13px;font-weight:600;color:#d1d5db">Best Trial #'+escHtml(String(m.best_trial.trial_id))+'</span><span style="font-size:20px;font-weight:800;color:#ffffff">'+eHoMetricText(m.best_trial)+'</span></div>';if(paramRows){h+='<table style="width:100%;border-collapse:collapse;margin-bottom:10px"><tbody>'+paramRows+'</tbody></table>'}h+='<button onclick="eHoApply(this,'+escHtml(JSON.stringify(JSON.stringify(m.best_trial)))+')" style="background:#121212;color:#ffffff;border:none;border-radius:0;padding:7px 18px;font-size:13px;font-weight:600;cursor:pointer;width:100%">&#10003; Apply &amp; Retrain with Best Params</button></div>'}h+='<p style="font-size:12px;color:#404040">Trials: '+(m.total_trials||0)+' | Time: '+(m.total_duration_secs||0).toFixed(2)+'s</p>';if(m.trials){var mLbl=eHoMetricLabel(m.best_trial||m.trials[0]);h+='<table style="margin-top:8px"><thead><tr><th>#</th><th>'+mLbl+'</th><th>Time</th></tr></thead><tbody>';m.trials.forEach(function(t){h+='<tr><td>'+t.trial_id+'</td><td class="mono">'+(t.value===Infinity?'Fail':eHoMetricValueText(t))+'</td><td class="mono">'+t.duration_secs.toFixed(2)+'s</td></tr>'});h+='</tbody></table>'}$('e-ho-result').innerHTML=h;if(m.trials)eHoCharts(m.trials,m.best_trial);$('e-ho-btn').disabled=false;$('e-ho-btn').textContent='Optimize';eNotify('Optimization done!','ok');eLogActivity('HyperOpt completed: '+$('e-ho-model').value);eHistPush({type:'HyperOpt',model:$('e-ho-model').value,metrics:m.best_trial?{best_score:m.best_trial.value,trials:m.total_trials}:{trials:m.total_trials},target:$('e-target').value,task:$('e-task').value,ts:Date.now()});eDashModels()}else if(s.Failed){$('e-ho-result').innerHTML='<p style="color:#121212">'+(s.Failed.error||'Failed')+'</p>';$('e-ho-btn').disabled=false;$('e-ho-btn').textContent='Optimize'}else{var p=s.Running?s.Running.progress||0:0;var pct=Math.round(p*100);var msg=s.Running?s.Running.message||'':'';$('e-ho-result').innerHTML='<div class="tp-card active"><div class="tp-header"><div class="tp-ring">'+eProgressRing(p,48,'#121212')+'<div class="tp-ring-text">'+pct+'%</div></div><div><div class="tp-phase">Hyperparameter Optimization</div><div class="tp-msg">'+msg+'</div><div class="tp-elapsed">'+eElapsed(eHoStart)+'</div></div></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:'+pct+'%;background:#121212"></div></div></div>';setTimeout(function(){eHoPoll(id)},1500)}}).catch(function(){setTimeout(function(){eHoPoll(id)},3000)})}
-    function eAutoTune(){if(!eData)return;var target=$('e-at-target').value;if(!target){eNotify('Select a target column first','err');return}eAtStart=Date.now();$('e-at-btn').disabled=true;$('e-at-btn').innerHTML='<span class="spinner"></span> Tuning...';var task=$('e-at-task').value;var models=eAtModelList(task);$('e-at-progress').style.display='block';var mh='<div class="mc-grid">';models.forEach(function(m){mh+='<div class="mc-card pending" id="e-mc-'+m.replace(/\s+/g,'_')+'"><div class="mc-name">'+m+'</div><div class="mc-score">Pending</div></div>'});mh+='</div>';$('e-at-progress').innerHTML='<div class="tp-card active"><div class="tp-header"><div class="tp-ring">'+eProgressRing(0,48,'#404040')+'<div class="tp-ring-text">0%</div></div><div><div class="tp-phase">Auto-Tune</div><div class="tp-msg">Starting '+models.length+' models...</div><div class="tp-elapsed">0s</div></div></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:0%;background:#404040"></div></div></div>'+mh;$('e-at-result').innerHTML='';$('e-at-result').className='';fetch('/api/autotune',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target_column:target,task_type:task})}).then(function(r){return r.json()}).then(function(d){if(d.job_id){eAtPoll(d.job_id)}}).catch(function(e){$('e-at-progress').style.display='none';$('e-at-result').innerHTML='<p style="color:#121212">'+e.message+'</p>';$('e-at-btn').disabled=false;$('e-at-btn').innerHTML='<i class="ri-speed-line"></i> Start Auto-Tune'})}
-    function eAtPoll(id){fetch('/api/train/status/'+id).then(function(r){return r.json()}).then(function(d){var s=d.status;if(s.Completed){$('e-at-progress').style.display='none';var m=s.Completed.metrics||{};var h='';if(m.best){h+='<div style="background:#121212;border-radius:0;padding:16px;color:#ffffff;margin-bottom:16px"><div style="font-size:12px;opacity:.6">Best Model</div><div style="font-size:22px;font-weight:700;margin:4px 0">'+m.best_model+'</div><div style="font-size:14px;color:#404040">Score: '+(m.best.score||0).toFixed(6)+'</div><div style="font-size:11px;opacity:.5;margin-top:4px">'+m.total_models_tested+' models tested in '+(m.total_time_secs||0).toFixed(1)+'s</div></div>'}if(m.leaderboard){h+='<table><thead><tr><th>#</th><th>Model</th><th>Score</th><th>Time</th><th>Status</th></tr></thead><tbody>';m.leaderboard.forEach(function(r,i){var ok=r.status==='success';h+='<tr><td style="font-weight:600;color:'+(i===0?'#404040':'#404040')+'">'+(i+1)+'</td><td style="font-weight:500">'+r.model+'</td><td class="mono">'+(ok?(r.score||0).toFixed(6):'—')+'</td><td class="mono">'+(r.training_time_secs||0).toFixed(2)+'s</td><td>'+(ok?'<span style="color:#404040">&#10003;</span>':'<span style="color:#121212">&#10007;</span>')+'</td></tr>'});h+='</tbody></table>'}$('e-at-result').innerHTML=h;$('e-at-btn').disabled=false;$('e-at-btn').innerHTML='<i class="ri-speed-line"></i> Start Auto-Tune';if(m.best&&m.best.status==='success'){eLastModelId='autotune_'+m.best_model+'_'+id;$('e-explain-btn').disabled=false}if(m.leaderboard)eAtCharts(m.leaderboard);eNotify('Auto-tune done! Best: '+m.best_model,'ok');eLogActivity('Auto-tune completed: best model '+m.best_model);eHistPush({type:'Auto-Tune',model:m.best_model||'—',metrics:m.best?{score:m.best.score,models_tested:m.total_models_tested,time_secs:m.total_time_secs}:{},target:$('e-at-target').value,task:$('e-at-task').value,ts:Date.now()});eDashModels();fetch('/api/models').then(function(r){return r.json()}).then(function(md){var mds=md.models||[];if(mds.length>0)eQualityFetch(mds[mds.length-1].id,'e-quality-panel-at')}).catch(function(){})}else if(s.Failed){$('e-at-progress').style.display='none';$('e-at-result').innerHTML='<p style="color:#121212">'+(s.Failed.error||'Failed')+'</p>';$('e-at-btn').disabled=false;$('e-at-btn').innerHTML='<i class="ri-speed-line"></i> Start Auto-Tune'}else{var p=s.Running?s.Running.progress||0:0;var pct=Math.round(p*100);var msg=s.Running?s.Running.message||'':'';var pr=s.Running?s.Running.partial_results:null;var done=pr?pr.length:0;var task=$('e-at-task').value;var models=eAtModelList(task);var total=models.length;var tp=$('e-at-progress');if(tp){var ring=tp.querySelector('.tp-ring');if(ring)ring.innerHTML=eProgressRing(p,48,'#404040')+'<div class="tp-ring-text">'+pct+'%</div>';var phase=tp.querySelector('.tp-phase');if(phase)phase.textContent='Auto-Tune ('+done+'/'+total+')';var tmsg=tp.querySelector('.tp-msg');if(tmsg)tmsg.textContent=msg;var tel=tp.querySelector('.tp-elapsed');if(tel)tel.textContent=eElapsed(eAtStart);var bar=tp.querySelector('.progress-fill');if(bar)bar.style.width=pct+'%'}if(pr&&pr.length>0){var doneSet={};pr.forEach(function(r){var key=r.model.replace(/[\s_]+/g,'_');doneSet[key]=r});models.forEach(function(m){var key=m.replace(/\s+/g,'_');var el=$('e-mc-'+key);if(!el)return;var entry=null;pr.forEach(function(r){if(r.model.replace(/[\s_]+/g,'_').toLowerCase()===key.toLowerCase()||r.model.toLowerCase()===m.toLowerCase())entry=r});if(entry){var ok=entry.status==='success';el.className='mc-card '+(ok?'done':'fail');el.innerHTML='<div class="mc-name">'+m+'</div><div class="mc-score">'+(ok?((entry.score||0).toFixed(4)):'Failed')+'</div>'}});var rh='';pr.sort(function(a,b){return(b.score||0)-(a.score||0)});pr.forEach(function(r){if(r.status==='success')rh+='<div style="display:flex;justify-content:space-between;padding:6px 8px;font-size:12px;border-bottom:1px solid #f0f0f0"><span style="font-weight:500">'+r.model+'</span><span class="mono" style="color:#404040">'+((r.score||0).toFixed(6))+'</span></div>'});if(rh)$('e-at-result').innerHTML='<div style="font-size:13px;font-weight:500;margin-bottom:6px;color:#404040">Live Leaderboard</div>'+rh;eAtCharts(pr)}setTimeout(function(){eAtPoll(id)},1500)}}).catch(function(){setTimeout(function(){eAtPoll(id)},3000)})}
-    function eEnsemble(){if(!eData)return;if(!eValidateTarget())return;eEnsStart=Date.now();var models=[];document.querySelectorAll('#e-ens-models input:checked').forEach(function(cb){models.push(cb.value)});if(models.length<2){eNotify('Select at least 2 models','err');return}$('e-ens-btn').disabled=true;$('e-ens-btn').innerHTML='<span class="spinner"></span> Training...';$('e-ens-result').innerHTML='<div class="tp-card active"><div class="tp-header"><div class="tp-ring">'+eProgressRing(0,48,'#121212')+'<div class="tp-ring-text">0%</div></div><div><div class="tp-phase">Ensemble Training</div><div class="tp-msg">Training '+models.length+' models with '+$('e-ens-strat').value+'...</div><div class="tp-elapsed">0s</div></div></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:0%;background:#121212"></div></div></div>';fetch('/api/ensemble/train',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target_column:$('e-target').value,task_type:$('e-task').value,models:models,strategy:$('e-ens-strat').value})}).then(function(r){return r.json()}).then(function(d){if(d.job_id){eEnsPoll(d.job_id)}}).catch(function(e){$('e-ens-result').innerHTML='<p style="color:#121212">'+e.message+'</p>';$('e-ens-btn').disabled=false;$('e-ens-btn').textContent='Train Ensemble'})}
-    function eEnsPoll(id){fetch('/api/train/status/'+id).then(function(r){return r.json()}).then(function(d){var s=d.status;if(s.Completed){var m=s.Completed.metrics||{};var _sk=['accuracy','f1','r2','auc','roc_auc','score'];var _bsf=function(mx){for(var ki=0;ki<_sk.length;ki++){if(mx&&typeof mx[_sk[ki]]==='number')return mx[_sk[ki]]}return null};var bestScore=null;(m.model_results||[]).forEach(function(r){if(r.status==='success'){var sv=_bsf(r.metrics);if(sv!==null&&(bestScore===null||sv>bestScore))bestScore=sv}});var bestScoreStr=bestScore!==null?bestScore.toFixed(4):'—';var h='<div style="background:#f0f0f0;padding:12px;border-radius:0;margin-bottom:12px"><strong>Ensemble:</strong> '+(m.strategy||'voting')+' | Models: '+(m.successful_models||0)+'/'+(m.model_count||0)+' | Time: '+(m.training_time_secs||0).toFixed(2)+'s | Best score: <span class="mono" style="color:#404040">'+bestScoreStr+'</span></div>';if(m.model_results){h+='<table><thead><tr><th>Model</th><th>Score</th><th>Status</th></tr></thead><tbody>';m.model_results.forEach(function(r){var sc=_bsf(r.metrics);var scStr=sc!==null?sc.toFixed(4):'—';h+='<tr><td>'+escHtml(r.model)+'</td><td class="mono" style="color:'+(sc!==null?'#404040':'#9ca3af')+'">'+scStr+'</td><td>'+(r.status==='success'?'<span style="color:#404040"><i class="ri-check-line"></i> Success</span>':'<span style="color:#121212"><i class="ri-close-line"></i> '+escHtml(r.error||'Failed')+'</span>')+'</td></tr>'});h+='</tbody></table>'}$('e-ens-result').innerHTML=h;$('e-ens-btn').disabled=false;$('e-ens-btn').textContent='Train Ensemble';eNotify('Ensemble done!','ok');eLogActivity('Ensemble training completed');eHistPush({type:'Ensemble',model:'Ensemble ('+$('e-ens-strat').value+')',metrics:{strategy:m.strategy,successful_models:m.successful_models,total:m.model_count,score:bestScore!==null?bestScore:0},target:$('e-target').value,task:$('e-task').value,ts:Date.now()});eDashModels()}else if(s.Failed){$('e-ens-result').innerHTML='<p style="color:#121212">'+(s.Failed.error||'Failed')+'</p>';$('e-ens-btn').disabled=false;$('e-ens-btn').textContent='Train Ensemble'}else{var p=s.Running?s.Running.progress||0:0;var pct=Math.round(p*100);var msg=s.Running?s.Running.message||'':'';$('e-ens-result').innerHTML='<div class="tp-card active"><div class="tp-header"><div class="tp-ring">'+eProgressRing(p,48,'#121212')+'<div class="tp-ring-text">'+pct+'%</div></div><div><div class="tp-phase">Ensemble Training</div><div class="tp-msg">'+msg+'</div><div class="tp-elapsed">'+eElapsed(eEnsStart)+'</div></div></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:'+pct+'%;background:#121212"></div></div></div>';setTimeout(function(){eEnsPoll(id)},1500)}}).catch(function(){setTimeout(function(){eEnsPoll(id)},3000)})}
+    function eTrain(){if(!eData||eTraining)return;if(!eValidateTarget())return;eTraining=true;eTrainStart=Date.now();var eTrainGen=++eModelGen;var eTrainPollTok=++ePollTok.single;$('e-train-btn').disabled=true;$('e-train-btn').innerHTML='<span class="spinner"></span> Training...';var model=$('e-model').options[$('e-model').selectedIndex].text;$('e-result').innerHTML='<div class="tp-card active"><div class="tp-header"><div class="tp-ring">'+eProgressRing(0.1,48)+'<div class="tp-ring-text">0%</div></div><div><div class="tp-phase">Training '+model+'</div><div class="tp-msg">Preparing data...</div><div class="tp-elapsed">0s</div></div></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:10%"></div></div>'+eStepBar(['Prepare','Split','Fit','Evaluate'],0)+'</div>';var cfg={target_column:$('e-target').value,task_type:$('e-task').value,model_type:$('e-model').value};fetch('/api/train',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cfg)}).then(function(r){return r.json()}).then(function(d){if(d.job_id){ePoll(d.job_id,eTrainGen,eTrainPollTok)}}).catch(function(e){$('e-result').innerHTML='<p style="color:#121212">'+e.message+'</p>';eTraining=false;$('e-train-btn').disabled=false;$('e-train-btn').textContent='Train Model'})}
+    function ePoll(id,gen,tok){if(tok!==ePollTok.single)return;fetch('/api/train/status/'+id).then(function(r){return r.json()}).then(function(d){if(tok!==ePollTok.single)return;var s=d.status;if(s.Completed){var m=s.Completed.metrics||{};var h='<table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>';Object.keys(m).forEach(function(k){h+='<tr><td>'+k+'</td><td class="mono">'+(typeof m[k]==='number'?m[k].toFixed(4):m[k])+'</td></tr>'});h+='</tbody></table>';$('e-result').innerHTML=h;var modelName=$('e-model').options[$('e-model').selectedIndex].text;eDashTrainResult(modelName,m);eTraining=false;$('e-train-btn').disabled=false;$('e-train-btn').textContent='Train Model';eNotify('Training complete!','ok');eLogActivity('Training completed: '+modelName);eHistPush({type:'Single',model:modelName,metrics:m,target:$('e-target').value,task:$('e-task').value,ts:Date.now()});eDashModels();eShowTrainViz(m);fetch('/api/models').then(function(r){return r.json()}).then(function(md){var models=md.models||[];if(models.length>0){var newId=models[models.length-1].id;eCommitModel(newId,gen,'Train');eQualityFetch(newId,'e-quality-panel');var safeId=newId.replace(/[^a-zA-Z0-9_-]/g,'');var umapDiv=document.createElement('div');umapDiv.style.cssText='margin-top:16px';var barWrap=document.createElement('div');barWrap.id='umap-bwrap-'+safeId;barWrap.style.cssText='margin-bottom:4px';var barLabel=document.createElement('div');barLabel.style.cssText='font-size:11px;color:#404040;margin-bottom:2px';barLabel.textContent='Computing UMAP\u2026';barWrap.appendChild(barLabel);var barTrack=document.createElement('div');barTrack.style.cssText='height:3px;background:#1a1a1a;border-radius:0';var barFill=document.createElement('div');barFill.id='umap-bar-'+safeId;barFill.style.cssText='height:3px;background:#121212;border-radius:0;width:0%;transition:width .3s';barTrack.appendChild(barFill);barWrap.appendChild(barTrack);var wrapDiv=document.createElement('div');wrapDiv.id='umap-wrap-'+safeId;var canvas=document.createElement('canvas');canvas.id='umap-scatter-'+safeId;canvas.style.cssText='width:100%;height:280px;display:block;border-radius:0;background:#121212';wrapDiv.appendChild(canvas);umapDiv.appendChild(barWrap);umapDiv.appendChild(wrapDiv);$('e-result').appendChild(umapDiv);eStartUmap(newId)}}).catch(function(){})}else if(s.Failed){$('e-result').innerHTML='<p style="color:#121212">'+(s.Failed.error||'Failed')+'</p>';eTraining=false;$('e-train-btn').disabled=false;$('e-train-btn').textContent='Train Model';eLogActivity('Training failed: '+(s.Failed.error||'Unknown error'))}else{var p=s.Running?s.Running.progress||0:0;var msg=s.Running?s.Running.message||'':'';var pct=Math.round(p*100);var model=$('e-model').options[$('e-model').selectedIndex].text;var step=0;if(p>0.1)step=1;if(p>0.3)step=2;if(p>0.8)step=3;$('e-result').innerHTML='<div class="tp-card active"><div class="tp-header"><div class="tp-ring">'+eProgressRing(p,48)+'<div class="tp-ring-text">'+pct+'%</div></div><div><div class="tp-phase">Training '+model+'</div><div class="tp-msg">'+msg+'</div><div class="tp-elapsed">'+eElapsed(eTrainStart)+'</div></div></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:'+pct+'%"></div></div>'+eStepBar(['Prepare','Split','Fit','Evaluate'],step)+'</div>';setTimeout(function(){ePoll(id,gen,tok)},1000)}}).catch(function(){setTimeout(function(){ePoll(id,gen,tok)},2000)})}
+    function eHyperOpt(){if(!eData)return;if(!eValidateTarget())return;eHoStart=Date.now();var eHoPollTok=++ePollTok.hyperopt;$('e-ho-btn').disabled=true;$('e-ho-btn').innerHTML='<span class="spinner"></span> Optimizing...';var nTrials=parseInt($('e-ho-trials').value);$('e-ho-result').innerHTML='<div class="tp-card active"><div class="tp-header"><div class="tp-ring">'+eProgressRing(0,48,'#121212')+'<div class="tp-ring-text">0%</div></div><div><div class="tp-phase">Hyperparameter Optimization</div><div class="tp-msg">Starting '+nTrials+' trials...</div><div class="tp-elapsed">0s</div></div></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:0%;background:#121212"></div></div></div>';fetch('/api/hyperopt',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target_column:$('e-target').value,task_type:$('e-task').value,model_type:$('e-ho-model').value,n_trials:nTrials,sampler:$('e-ho-sampler').value})}).then(function(r){return r.json()}).then(function(d){if(d.job_id){eHoPoll(d.job_id,eHoPollTok)}}).catch(function(e){$('e-ho-result').innerHTML='<p style="color:#121212">'+e.message+'</p>';$('e-ho-btn').disabled=false;$('e-ho-btn').textContent='Optimize'})}
+    function eHoPoll(id,tok){if(tok!==ePollTok.hyperopt)return;fetch('/api/train/status/'+id).then(function(r){return r.json()}).then(function(d){if(tok!==ePollTok.hyperopt)return;var s=d.status;if(s.Completed){var m=s.Completed.metrics||{};var h='';if(m.best_trial){var bp=m.best_trial.params||{};var paramRows='';Object.keys(bp).forEach(function(k){var v=bp[k];paramRows+='<tr><td style="padding:3px 8px;color:#9ca3af;font-size:12px">'+escHtml(k)+'</td><td class="mono" style="padding:3px 8px;font-size:12px;color:#e5e7eb">'+(typeof v==='number'?v.toFixed(4):escHtml(String(v)))+'</td></tr>'});h+='<div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:0;padding:14px;margin-bottom:12px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><span style="font-size:13px;font-weight:600;color:#d1d5db">Best Trial #'+escHtml(String(m.best_trial.trial_id))+'</span><span style="font-size:20px;font-weight:800;color:#ffffff">'+eHoMetricText(m.best_trial)+'</span></div>';if(paramRows){h+='<table style="width:100%;border-collapse:collapse;margin-bottom:10px"><tbody>'+paramRows+'</tbody></table>'}h+='<button onclick="eHoApply(this,'+escHtml(JSON.stringify(JSON.stringify(m.best_trial)))+')" style="background:#121212;color:#ffffff;border:none;border-radius:0;padding:7px 18px;font-size:13px;font-weight:600;cursor:pointer;width:100%">&#10003; Apply &amp; Retrain with Best Params</button></div>'}h+='<p style="font-size:12px;color:#404040">Trials: '+(m.total_trials||0)+' | Time: '+(m.total_duration_secs||0).toFixed(2)+'s</p>';if(m.trials){var mLbl=eHoMetricLabel(m.best_trial||m.trials[0]);h+='<table style="margin-top:8px"><thead><tr><th>#</th><th>'+mLbl+'</th><th>Time</th></tr></thead><tbody>';m.trials.forEach(function(t){h+='<tr><td>'+t.trial_id+'</td><td class="mono">'+(t.value===Infinity?'Fail':eHoMetricValueText(t))+'</td><td class="mono">'+t.duration_secs.toFixed(2)+'s</td></tr>'});h+='</tbody></table>'}$('e-ho-result').innerHTML=h;if(m.trials)eHoCharts(m.trials,m.best_trial);$('e-ho-btn').disabled=false;$('e-ho-btn').textContent='Optimize';eNotify('Optimization done!','ok');eLogActivity('HyperOpt completed: '+$('e-ho-model').value);eHistPush({type:'HyperOpt',model:$('e-ho-model').value,metrics:m.best_trial?{best_score:m.best_trial.value,trials:m.total_trials}:{trials:m.total_trials},target:$('e-target').value,task:$('e-task').value,ts:Date.now()});eDashModels()}else if(s.Failed){$('e-ho-result').innerHTML='<p style="color:#121212">'+(s.Failed.error||'Failed')+'</p>';$('e-ho-btn').disabled=false;$('e-ho-btn').textContent='Optimize'}else{var p=s.Running?s.Running.progress||0:0;var pct=Math.round(p*100);var msg=s.Running?s.Running.message||'':'';$('e-ho-result').innerHTML='<div class="tp-card active"><div class="tp-header"><div class="tp-ring">'+eProgressRing(p,48,'#121212')+'<div class="tp-ring-text">'+pct+'%</div></div><div><div class="tp-phase">Hyperparameter Optimization</div><div class="tp-msg">'+msg+'</div><div class="tp-elapsed">'+eElapsed(eHoStart)+'</div></div></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:'+pct+'%;background:#121212"></div></div></div>';setTimeout(function(){eHoPoll(id,tok)},1500)}}).catch(function(){setTimeout(function(){eHoPoll(id,tok)},3000)})}
+    function eAutoTune(){if(!eData)return;var target=$('e-at-target').value;if(!target){eNotify('Select a target column first','err');return}eAtStart=Date.now();var eAtGen=++eModelGen;var eAtPollTok=++ePollTok.autotune;$('e-at-btn').disabled=true;$('e-at-btn').innerHTML='<span class="spinner"></span> Tuning...';var task=$('e-at-task').value;var models=eAtModelList(task);$('e-at-progress').style.display='block';var mh='<div class="mc-grid">';models.forEach(function(m){mh+='<div class="mc-card pending" id="e-mc-'+m.replace(/\s+/g,'_')+'"><div class="mc-name">'+m+'</div><div class="mc-score">Pending</div></div>'});mh+='</div>';$('e-at-progress').innerHTML='<div class="tp-card active"><div class="tp-header"><div class="tp-ring">'+eProgressRing(0,48,'#404040')+'<div class="tp-ring-text">0%</div></div><div><div class="tp-phase">Auto-Tune</div><div class="tp-msg">Starting '+models.length+' models...</div><div class="tp-elapsed">0s</div></div></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:0%;background:#404040"></div></div></div>'+mh;$('e-at-result').innerHTML='';$('e-at-result').className='';fetch('/api/autotune',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target_column:target,task_type:task})}).then(function(r){return r.json()}).then(function(d){if(d.job_id){eAtPoll(d.job_id,eAtGen,eAtPollTok)}}).catch(function(e){$('e-at-progress').style.display='none';$('e-at-result').innerHTML='<p style="color:#121212">'+e.message+'</p>';$('e-at-btn').disabled=false;$('e-at-btn').innerHTML='<i class="ri-speed-line"></i> Start Auto-Tune'})}
+    function eAtPoll(id,gen,tok){if(tok!==ePollTok.autotune)return;fetch('/api/train/status/'+id).then(function(r){return r.json()}).then(function(d){if(tok!==ePollTok.autotune)return;var s=d.status;if(s.Completed){$('e-at-progress').style.display='none';var m=s.Completed.metrics||{};var h='';if(m.best){h+='<div style="background:#121212;border-radius:0;padding:16px;color:#ffffff;margin-bottom:16px"><div style="font-size:12px;opacity:.6">Best Model</div><div style="font-size:22px;font-weight:700;margin:4px 0">'+m.best_model+'</div><div style="font-size:14px;color:#404040">Score: '+(m.best.score||0).toFixed(6)+'</div><div style="font-size:11px;opacity:.5;margin-top:4px">'+m.total_models_tested+' models tested in '+(m.total_time_secs||0).toFixed(1)+'s</div></div>'}if(m.leaderboard){h+='<table><thead><tr><th>#</th><th>Model</th><th>Score</th><th>Time</th><th>Status</th></tr></thead><tbody>';m.leaderboard.forEach(function(r,i){var ok=r.status==='success';h+='<tr><td style="font-weight:600;color:'+(i===0?'#404040':'#404040')+'">'+(i+1)+'</td><td style="font-weight:500">'+r.model+'</td><td class="mono">'+(ok?(r.score||0).toFixed(6):'—')+'</td><td class="mono">'+(r.training_time_secs||0).toFixed(2)+'s</td><td>'+(ok?'<span style="color:#404040">&#10003;</span>':'<span style="color:#121212">&#10007;</span>')+'</td></tr>'});h+='</tbody></table>'}$('e-at-result').innerHTML=h;$('e-at-btn').disabled=false;$('e-at-btn').innerHTML='<i class="ri-speed-line"></i> Start Auto-Tune';if(m.best&&m.best.status==='success'){eCommitModel('autotune_'+m.best_model+'_'+id,gen,'Auto-Tune')}if(m.leaderboard)eAtCharts(m.leaderboard);eNotify('Auto-tune done! Best: '+m.best_model,'ok');eLogActivity('Auto-tune completed: best model '+m.best_model);eHistPush({type:'Auto-Tune',model:m.best_model||'—',metrics:m.best?{score:m.best.score,models_tested:m.total_models_tested,time_secs:m.total_time_secs}:{},target:$('e-at-target').value,task:$('e-at-task').value,ts:Date.now()});eDashModels();fetch('/api/models').then(function(r){return r.json()}).then(function(md){var mds=md.models||[];if(mds.length>0)eQualityFetch(mds[mds.length-1].id,'e-quality-panel-at')}).catch(function(){})}else if(s.Failed){$('e-at-progress').style.display='none';$('e-at-result').innerHTML='<p style="color:#121212">'+(s.Failed.error||'Failed')+'</p>';$('e-at-btn').disabled=false;$('e-at-btn').innerHTML='<i class="ri-speed-line"></i> Start Auto-Tune'}else{var p=s.Running?s.Running.progress||0:0;var pct=Math.round(p*100);var msg=s.Running?s.Running.message||'':'';var pr=s.Running?s.Running.partial_results:null;var done=pr?pr.length:0;var task=$('e-at-task').value;var models=eAtModelList(task);var total=models.length;var tp=$('e-at-progress');if(tp){var ring=tp.querySelector('.tp-ring');if(ring)ring.innerHTML=eProgressRing(p,48,'#404040')+'<div class="tp-ring-text">'+pct+'%</div>';var phase=tp.querySelector('.tp-phase');if(phase)phase.textContent='Auto-Tune ('+done+'/'+total+')';var tmsg=tp.querySelector('.tp-msg');if(tmsg)tmsg.textContent=msg;var tel=tp.querySelector('.tp-elapsed');if(tel)tel.textContent=eElapsed(eAtStart);var bar=tp.querySelector('.progress-fill');if(bar)bar.style.width=pct+'%'}if(pr&&pr.length>0){var doneSet={};pr.forEach(function(r){var key=r.model.replace(/[\s_]+/g,'_');doneSet[key]=r});models.forEach(function(m){var key=m.replace(/\s+/g,'_');var el=$('e-mc-'+key);if(!el)return;var entry=null;pr.forEach(function(r){if(r.model.replace(/[\s_]+/g,'_').toLowerCase()===key.toLowerCase()||r.model.toLowerCase()===m.toLowerCase())entry=r});if(entry){var ok=entry.status==='success';el.className='mc-card '+(ok?'done':'fail');el.innerHTML='<div class="mc-name">'+m+'</div><div class="mc-score">'+(ok?((entry.score||0).toFixed(4)):'Failed')+'</div>'}});var rh='';pr.sort(function(a,b){return(b.score||0)-(a.score||0)});pr.forEach(function(r){if(r.status==='success')rh+='<div style="display:flex;justify-content:space-between;padding:6px 8px;font-size:12px;border-bottom:1px solid #f0f0f0"><span style="font-weight:500">'+r.model+'</span><span class="mono" style="color:#404040">'+((r.score||0).toFixed(6))+'</span></div>'});if(rh)$('e-at-result').innerHTML='<div style="font-size:13px;font-weight:500;margin-bottom:6px;color:#404040">Live Leaderboard</div>'+rh;eAtCharts(pr)}setTimeout(function(){eAtPoll(id,gen,tok)},1500)}}).catch(function(){setTimeout(function(){eAtPoll(id,gen,tok)},3000)})}
+    function eEnsemble(){if(!eData)return;if(!eValidateTarget())return;eEnsStart=Date.now();var eEnsPollTok=++ePollTok.ensemble;var models=[];document.querySelectorAll('#e-ens-models input:checked').forEach(function(cb){models.push(cb.value)});if(models.length<2){eNotify('Select at least 2 models','err');return}$('e-ens-btn').disabled=true;$('e-ens-btn').innerHTML='<span class="spinner"></span> Training...';$('e-ens-result').innerHTML='<div class="tp-card active"><div class="tp-header"><div class="tp-ring">'+eProgressRing(0,48,'#121212')+'<div class="tp-ring-text">0%</div></div><div><div class="tp-phase">Ensemble Training</div><div class="tp-msg">Training '+models.length+' models with '+$('e-ens-strat').value+'...</div><div class="tp-elapsed">0s</div></div></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:0%;background:#121212"></div></div></div>';fetch('/api/ensemble/train',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target_column:$('e-target').value,task_type:$('e-task').value,models:models,strategy:$('e-ens-strat').value})}).then(function(r){return r.json()}).then(function(d){if(d.job_id){eEnsPoll(d.job_id,eEnsPollTok)}}).catch(function(e){$('e-ens-result').innerHTML='<p style="color:#121212">'+e.message+'</p>';$('e-ens-btn').disabled=false;$('e-ens-btn').textContent='Train Ensemble'})}
+    function eEnsPoll(id,tok){if(tok!==ePollTok.ensemble)return;fetch('/api/train/status/'+id).then(function(r){return r.json()}).then(function(d){if(tok!==ePollTok.ensemble)return;var s=d.status;if(s.Completed){var m=s.Completed.metrics||{};var _sk=['accuracy','f1','r2','auc','roc_auc','score'];var _bsf=function(mx){for(var ki=0;ki<_sk.length;ki++){if(mx&&typeof mx[_sk[ki]]==='number')return mx[_sk[ki]]}return null};var bestScore=null;(m.model_results||[]).forEach(function(r){if(r.status==='success'){var sv=_bsf(r.metrics);if(sv!==null&&(bestScore===null||sv>bestScore))bestScore=sv}});var bestScoreStr=bestScore!==null?bestScore.toFixed(4):'—';var h='<div style="background:#f0f0f0;padding:12px;border-radius:0;margin-bottom:12px"><strong>Ensemble:</strong> '+(m.strategy||'voting')+' | Models: '+(m.successful_models||0)+'/'+(m.model_count||0)+' | Time: '+(m.training_time_secs||0).toFixed(2)+'s | Best score: <span class="mono" style="color:#404040">'+bestScoreStr+'</span></div>';if(m.model_results){h+='<table><thead><tr><th>Model</th><th>Score</th><th>Status</th></tr></thead><tbody>';m.model_results.forEach(function(r){var sc=_bsf(r.metrics);var scStr=sc!==null?sc.toFixed(4):'—';h+='<tr><td>'+escHtml(r.model)+'</td><td class="mono" style="color:'+(sc!==null?'#404040':'#9ca3af')+'">'+scStr+'</td><td>'+(r.status==='success'?'<span style="color:#404040"><i class="ri-check-line"></i> Success</span>':'<span style="color:#121212"><i class="ri-close-line"></i> '+escHtml(r.error||'Failed')+'</span>')+'</td></tr>'});h+='</tbody></table>'}$('e-ens-result').innerHTML=h;$('e-ens-btn').disabled=false;$('e-ens-btn').textContent='Train Ensemble';eNotify('Ensemble done!','ok');eLogActivity('Ensemble training completed');eHistPush({type:'Ensemble',model:'Ensemble ('+$('e-ens-strat').value+')',metrics:{strategy:m.strategy,successful_models:m.successful_models,total:m.model_count,score:bestScore!==null?bestScore:0},target:$('e-target').value,task:$('e-task').value,ts:Date.now()});eDashModels()}else if(s.Failed){$('e-ens-result').innerHTML='<p style="color:#121212">'+(s.Failed.error||'Failed')+'</p>';$('e-ens-btn').disabled=false;$('e-ens-btn').textContent='Train Ensemble'}else{var p=s.Running?s.Running.progress||0:0;var pct=Math.round(p*100);var msg=s.Running?s.Running.message||'':'';$('e-ens-result').innerHTML='<div class="tp-card active"><div class="tp-header"><div class="tp-ring">'+eProgressRing(p,48,'#121212')+'<div class="tp-ring-text">'+pct+'%</div></div><div><div class="tp-phase">Ensemble Training</div><div class="tp-msg">'+msg+'</div><div class="tp-elapsed">'+eElapsed(eEnsStart)+'</div></div></div><div class="progress" style="height:4px"><div class="progress-fill" style="width:'+pct+'%;background:#121212"></div></div></div>';setTimeout(function(){eEnsPoll(id,tok)},1500)}}).catch(function(){setTimeout(function(){eEnsPoll(id,tok)},3000)})}
     function eExplain(){if(!eLastModelId)return;$('e-explain-btn').disabled=true;$('e-explain-btn').innerHTML='<span class="spinner"></span> Analyzing...';fetch('/api/explain/importance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model_id:eLastModelId})}).then(function(r){return r.json()}).then(function(d){if(d.success&&d.features&&d.features.length>0){var mx=Math.max.apply(null,d.features.map(function(f){return Math.abs(f.importance)}));var colors=['#121212','#404040','#6b6b6b','#121212','#121212','#121212','#121212','#121212'];var h='<table><thead><tr><th>Feature</th><th>Importance</th><th style="width:45%">Distribution</th></tr></thead><tbody>';d.features.forEach(function(f,i){var pct=mx>0?(Math.abs(f.importance)/mx*100).toFixed(0):0;var ci=colors[i%colors.length];h+='<tr><td style="font-weight:500">'+f.feature+'</td><td class="mono" style="color:'+ci+'">'+f.importance.toFixed(6)+'</td><td><div style="width:100%;background:#f0f0f0;border-radius:0;height:12px;overflow:hidden"><div style="width:'+pct+'%;background:linear-gradient(90deg,'+ci+','+ci+'88);border-radius:0;height:12px;transition:width .6s ease"></div></div></td></tr>'});h+='</tbody></table>';$('e-explain-result').innerHTML=h}else{$('e-explain-result').innerHTML='<p style="color:#404040">'+(d.message||'Not available for this model')+'</p>'}$('e-explain-btn').disabled=false;$('e-explain-btn').textContent='Analyze'}).catch(function(e){$('e-explain-result').innerHTML='<p style="color:#121212">'+e.message+'</p>';$('e-explain-btn').disabled=false;$('e-explain-btn').textContent='Analyze'})}
     function eAnomaly(){if(!eData)return;$('e-anomaly-btn').disabled=true;$('e-anomaly-btn').innerHTML='<span class="spinner"></span> Detecting...';$('e-anomaly-result').innerHTML='<p style="color:#404040">Detecting anomalies...</p>';fetch('/api/anomaly/detect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contamination:parseFloat($('e-anom-cont').value),n_estimators:parseInt($('e-anom-est').value)})}).then(function(r){return r.json()}).then(function(d){$('e-anomaly-btn').disabled=false;$('e-anomaly-btn').textContent='Detect';if(d.success){var rate=((d.anomaly_rate||0)*100).toFixed(1);$('e-anomaly-result').innerHTML='<div class="grid-2"><div><span class="stat stat-info">'+d.total_samples+'</span><p style="font-size:12px;color:#404040">Samples</p></div><div><span class="stat stat-err">'+d.anomalies_found+'</span><p style="font-size:12px;color:#404040">Anomalies ('+rate+'%)</p></div></div>';$('e-anom-viz').style.display='block';eDrawDonut('e-anom-donut',[{label:'Normal',value:d.total_samples-d.anomalies_found},{label:'Anomaly',value:d.anomalies_found}],{colors:['#404040','#121212']});$('e-anom-donut-center').innerHTML='<div class="donut-val" style="color:#121212">'+rate+'%</div><div class="donut-label">anomalies</div>';if(eData&&eData.preview){var numCols=[];eData.column_names.forEach(function(c){var ok=true;for(var i=0;i<Math.min(eData.preview.length,10);i++){if(isNaN(parseFloat(eData.preview[i][c]))){ok=false;break}}if(ok)numCols.push(c)});if(numCols.length>=2){var pts=[];var anomIdx=d.anomaly_indices||[];var anomSet={};anomIdx.forEach(function(i){anomSet[i]=true});eData.preview.forEach(function(row,i){var x=parseFloat(row[numCols[0]]),y=parseFloat(row[numCols[1]]);if(!isNaN(x)&&!isNaN(y))pts.push({x:x,y:y,c:anomSet[i]?1:0,s:anomSet[i]?5:3})});eDrawScatter('e-anom-scatter',pts,{xLabel:numCols[0],yLabel:numCols[1],colors:['#404040','#121212'],tipEl:$('e-anom-tip')})}}}else{$('e-anomaly-result').innerHTML='<p style="color:#121212">'+(d.message||'Failed')+'</p>'}}).catch(function(e){$('e-anomaly-btn').disabled=false;$('e-anomaly-btn').textContent='Detect';$('e-anomaly-result').innerHTML='<p style="color:#121212">'+e.message+'</p>'})}
     function eUpdateAutoMLTarget(){var sel=$('e-automl-target');if(!sel||!eData)return;sel.innerHTML='<option value="">Select target...</option>';(eData.column_names||[]).forEach(function(c){var o=document.createElement('option');o.value=c;o.textContent=c;sel.appendChild(o)});sel.onchange=function(){$('e-btn-automl').disabled=!this.value}}
@@ -2580,8 +2718,8 @@ const EMBEDDED_INDEX_HTML: &str = r#"<!DOCTYPE html>
         eDrawLine('e-ho-best',bestPts,{color:'#404040',label:'Trial #'});
         eHo3dChart(trials,bestTrial);
     }
-    function eHoApply(btn,bestTrialJson){var bestTrial=JSON.parse(bestTrialJson);if(btn){btn.disabled=true;btn.textContent='Retraining…'}var targetCol=$('e-target')?$('e-target').value:'';var taskType=$('e-task')?$('e-task').value:'';var modelType=$('e-ho-model')?$('e-ho-model').value:'';if(!targetCol||!taskType){eNotify('Load a dataset first','err');if(btn){btn.disabled=false;btn.textContent='✓ Apply & Retrain with Best Params'}return}fetch('/api/hyperopt/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target_column:targetCol,task_type:taskType,model_type:modelType,params:bestTrial.params||{}})}).then(function(r){return r.json()}).then(function(d){if(!d.job_id){throw new Error(d.error||'No job_id')}eHoApplyPoll(d.job_id,modelType,btn)}).catch(function(e){eNotify('Apply failed: '+e.message,'err');if(btn){btn.disabled=false;btn.textContent='✓ Apply & Retrain with Best Params'}})}
-    function eHoApplyPoll(jobId,modelType,btn){fetch('/api/train/status/'+jobId).then(function(r){return r.json()}).then(function(d){var s=d.status;if(s.Completed){var m=s.Completed.metrics||{};var newId=m.model_id||('optimized_'+modelType+'_'+jobId);eLastModelId=newId;var explBtn=$('e-explain-btn');if(explBtn)explBtn.disabled=false;eQualityFetch(newId,'e-quality-panel');eDashModels();eNotify('Optimized model trained!','ok');eLogActivity('HyperOpt Apply: '+modelType);eHistPush({type:'HyperOpt-Apply',model:modelType,metrics:m.metrics||{},target:$('e-target')?$('e-target').value:'',task:$('e-task')?$('e-task').value:'',ts:Date.now()});var safeId=newId.replace(/[^a-zA-Z0-9_-]/g,'');var existingResult=$('e-result');if(existingResult){var umapDiv=document.createElement('div');umapDiv.style.cssText='margin-top:16px';var bw=document.createElement('div');bw.id='umap-bwrap-'+safeId;bw.style.cssText='margin-bottom:4px';var bl=document.createElement('div');bl.style.cssText='font-size:11px;color:#404040;margin-bottom:2px';bl.textContent='Computing UMAP…';bw.appendChild(bl);var bt=document.createElement('div');bt.style.cssText='height:3px;background:#1a1a1a;border-radius:0';var bf=document.createElement('div');bf.id='umap-bar-'+safeId;bf.style.cssText='height:3px;background:#121212;border-radius:0;width:0%;transition:width .3s';bt.appendChild(bf);bw.appendChild(bt);var wd=document.createElement('div');wd.id='umap-wrap-'+safeId;var cv=document.createElement('canvas');cv.id='umap-scatter-'+safeId;cv.style.cssText='width:100%;height:280px;display:block;border-radius:0;background:#121212';wd.appendChild(cv);umapDiv.appendChild(bw);umapDiv.appendChild(wd);existingResult.appendChild(umapDiv);eStartUmap(newId)}var met=m.metrics||{};var mh='<div style="background:#121212;border-radius:0;padding:12px;margin-top:10px;font-size:12px;color:#9ca3af"><div style="font-weight:600;color:#e5e7eb;margin-bottom:6px">Optimized Model Metrics</div>';Object.keys(met).forEach(function(k){if(typeof met[k]==='number')mh+='<div style="display:flex;justify-content:space-between"><span>'+escHtml(k)+'</span><span class="mono" style="color:#ffffff">'+met[k].toFixed(4)+'</span></div>'});mh+='</div>';var hoRes=$('e-ho-result');if(hoRes){var applyRes=document.createElement('div');applyRes.innerHTML=mh;hoRes.appendChild(applyRes)}if(btn){btn.disabled=false;btn.textContent='✓ Apply & Retrain with Best Params'}}else if(s.Failed){eNotify('Apply failed: '+(s.Failed.error||'Unknown'),'err');if(btn){btn.disabled=false;btn.textContent='✓ Apply & Retrain with Best Params'}}else{setTimeout(function(){eHoApplyPoll(jobId,modelType,btn)},1500)}}).catch(function(){setTimeout(function(){eHoApplyPoll(jobId,modelType,btn)},3000)})}
+    function eHoApply(btn,bestTrialJson){var bestTrial=JSON.parse(bestTrialJson);if(btn){btn.disabled=true;btn.textContent='Retraining…'}var targetCol=$('e-target')?$('e-target').value:'';var taskType=$('e-task')?$('e-task').value:'';var modelType=$('e-ho-model')?$('e-ho-model').value:'';if(!targetCol||!taskType){eNotify('Load a dataset first','err');if(btn){btn.disabled=false;btn.textContent='✓ Apply & Retrain with Best Params'}return}var eHoApplyGen=++eModelGen;var eHoApplyPollTok=++ePollTok.hoApply;fetch('/api/hyperopt/apply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target_column:targetCol,task_type:taskType,model_type:modelType,params:bestTrial.params||{}})}).then(function(r){return r.json()}).then(function(d){if(!d.job_id){throw new Error(d.error||'No job_id')}eHoApplyPoll(d.job_id,modelType,btn,eHoApplyGen,eHoApplyPollTok)}).catch(function(e){eNotify('Apply failed: '+e.message,'err');if(btn){btn.disabled=false;btn.textContent='✓ Apply & Retrain with Best Params'}})}
+    function eHoApplyPoll(jobId,modelType,btn,gen,tok){if(tok!==ePollTok.hoApply)return;fetch('/api/train/status/'+jobId).then(function(r){return r.json()}).then(function(d){if(tok!==ePollTok.hoApply)return;var s=d.status;if(s.Completed){var m=s.Completed.metrics||{};var newId=m.model_id||('optimized_'+modelType+'_'+jobId);eCommitModel(newId,gen,'HyperOpt Apply');eQualityFetch(newId,'e-quality-panel');eDashModels();eNotify('Optimized model trained!','ok');eLogActivity('HyperOpt Apply: '+modelType);eHistPush({type:'HyperOpt-Apply',model:modelType,metrics:m.metrics||{},target:$('e-target')?$('e-target').value:'',task:$('e-task')?$('e-task').value:'',ts:Date.now()});var safeId=newId.replace(/[^a-zA-Z0-9_-]/g,'');var existingResult=$('e-result');if(existingResult){var prevUmap=document.getElementById('e-ho-apply-umap-wrap');if(prevUmap)prevUmap.remove();var umapDiv=document.createElement('div');umapDiv.id='e-ho-apply-umap-wrap';umapDiv.style.cssText='margin-top:16px';var bw=document.createElement('div');bw.id='umap-bwrap-'+safeId;bw.style.cssText='margin-bottom:4px';var bl=document.createElement('div');bl.style.cssText='font-size:11px;color:#404040;margin-bottom:2px';bl.textContent='Computing UMAP…';bw.appendChild(bl);var bt=document.createElement('div');bt.style.cssText='height:3px;background:#1a1a1a;border-radius:0';var bf=document.createElement('div');bf.id='umap-bar-'+safeId;bf.style.cssText='height:3px;background:#121212;border-radius:0;width:0%;transition:width .3s';bt.appendChild(bf);bw.appendChild(bt);var wd=document.createElement('div');wd.id='umap-wrap-'+safeId;var cv=document.createElement('canvas');cv.id='umap-scatter-'+safeId;cv.style.cssText='width:100%;height:280px;display:block;border-radius:0;background:#121212';wd.appendChild(cv);umapDiv.appendChild(bw);umapDiv.appendChild(wd);existingResult.appendChild(umapDiv);eStartUmap(newId)}var met=m.metrics||{};var mh='<div style="background:#121212;border-radius:0;padding:12px;margin-top:10px;font-size:12px;color:#9ca3af"><div style="font-weight:600;color:#e5e7eb;margin-bottom:6px">Optimized Model Metrics</div>';Object.keys(met).forEach(function(k){if(typeof met[k]==='number')mh+='<div style="display:flex;justify-content:space-between"><span>'+escHtml(k)+'</span><span class="mono" style="color:#ffffff">'+met[k].toFixed(4)+'</span></div>'});mh+='</div>';var hoRes=$('e-ho-result');if(hoRes){var applyRes=document.createElement('div');applyRes.innerHTML=mh;hoRes.appendChild(applyRes)}if(btn){btn.disabled=false;btn.textContent='✓ Apply & Retrain with Best Params'}}else if(s.Failed){eNotify('Apply failed: '+(s.Failed.error||'Unknown'),'err');if(btn){btn.disabled=false;btn.textContent='✓ Apply & Retrain with Best Params'}}else{setTimeout(function(){eHoApplyPoll(jobId,modelType,btn,gen,tok)},1500)}}).catch(function(){setTimeout(function(){eHoApplyPoll(jobId,modelType,btn,gen,tok)},3000)})}
     function eHo3dChart(trials,bestTrial){
         if(typeof Plotly==='undefined')return;
         var valid=trials.filter(function(t){return t.value!==Infinity&&t.value!=null&&t.params&&typeof t.params==='object'});
@@ -2661,7 +2799,8 @@ const EMBEDDED_INDEX_HTML: &str = r#"<!DOCTYPE html>
         items.sort(function(a,b){return b.value-a.value});eDrawBars('e-at-bar',items,{label:'Model Score'});
     }
     function eUmapScatter(modelId,taskType,pts,vr,done){var c=document.getElementById('umap-scatter-'+modelId);if(!c)return;var dpr=window.devicePixelRatio||1;var W=c.offsetWidth||320,H=280;c.width=W*dpr;c.height=H*dpr;c.style.width=W+'px';c.style.height=H+'px';var ctx=c.getContext('2d');ctx.scale(dpr,dpr);ctx.clearRect(0,0,W,H);var PAL=['#000000','#222222','#444444','#666666','#888888','#aaaaaa','#cccccc','#111111','#333333','#555555'];var isReg=taskType==='Regression'||taskType==='TimeSeries';if(!pts||!pts.length)return;var xs=pts.map(function(p){return p.x}),ys=pts.map(function(p){return p.y});var xMin=Math.min.apply(null,xs),xMax=Math.max.apply(null,xs);var yMin=Math.min.apply(null,ys),yMax=Math.max.apply(null,ys);var pad=isReg?{t:16,r:64,b:16,l:16}:{t:16,r:16,b:16,l:16};var pW=W-pad.l-pad.r,pH=H-pad.t-pad.b;var xR=xMax-xMin||1,yR=yMax-yMin||1;function tx(v){return pad.l+(v-xMin)/xR*pW}function ty(v){return pad.t+pH-(v-yMin)/yR*pH}var labelMap={};var labelIdx=0;pts.forEach(function(p){if(isReg)return;var lbl=p.label||'?';if(labelMap[lbl]===undefined)labelMap[lbl]=labelIdx++});pts.forEach(function(p){var cx2=tx(p.x),cy2=ty(p.y);var col;if(isReg){var mn=vr?vr[0]:0,mx2=vr?vr[1]:1;var t=mx2>mn?(p.value-mn)/(mx2-mn):0.5;t=Math.max(0,Math.min(1,t));col='hsl(0,0%,'+Math.round((1-t)*80+10)+'%)'}else{col=PAL[(labelMap[p.label||'?']||0)%PAL.length]}ctx.beginPath();ctx.arc(cx2,cy2,3,0,Math.PI*2);ctx.globalAlpha=0.75;ctx.fillStyle=col;ctx.fill();ctx.globalAlpha=1});ctx.font='11px system-ui';ctx.textBaseline='middle';if(isReg){var gx=W-pad.r+8,gy=pad.t,gh=pH,gw=12;var grad=ctx.createLinearGradient(0,gy,0,gy+gh);grad.addColorStop(0,'hsl(0,0%,10%)');grad.addColorStop(1,'hsl(0,0%,90%)');ctx.fillStyle=grad;ctx.fillRect(gx,gy,gw,gh);ctx.fillStyle='#6a6f73';var mn3=vr?vr[0]:0,mx3=vr?vr[1]:1;ctx.textAlign='left';ctx.fillText(mx3.toFixed(1),gx+gw+3,gy);ctx.fillText(mn3.toFixed(1),gx+gw+3,gy+gh)}else{var allLabels=Object.keys(labelMap);var maxVis=Math.floor((H-pad.t-12)/16);var visLabels=allLabels.slice(0,maxVis);var ly=H-12-visLabels.length*16;visLabels.forEach(function(lbl,i){var ci=PAL[labelMap[lbl]%PAL.length];ctx.beginPath();ctx.arc(14,ly+i*16,5,0,Math.PI*2);ctx.fillStyle=ci;ctx.fill();ctx.fillStyle='#6a6f73';ctx.textAlign='left';ctx.fillText(lbl,22,ly+i*16)})}ctx.font='bold 11px system-ui';ctx.fillStyle='#9c9fa1';ctx.textAlign='left';ctx.textBaseline='top';ctx.fillText(done?'UMAP Embedding':'UMAP (computing\u2026)',8,4)}
-    function eStartUmap(rawId){var modelId=rawId.replace(/[^a-zA-Z0-9_-]/g,'');var wrap=document.getElementById('umap-wrap-'+modelId);var bar=document.getElementById('umap-bar-'+modelId);if(!wrap)return;if(!window._umapSrc)window._umapSrc={};if(window._umapSrc[modelId])window._umapSrc[modelId].close();var es=new EventSource('/api/visualization/umap/stream?model_id='+encodeURIComponent(rawId));window._umapSrc[modelId]=es;es.onmessage=function(e){var d;try{d=JSON.parse(e.data)}catch(ex){return}if(d.error){if(wrap){wrap.textContent='UMAP: '+d.error}es.close();return}if(bar)bar.style.width=Math.round((d.progress||0)*100)+'%';eUmapScatter(modelId,d.task_type,d.points,d.value_range,d.done);if(d.done){var bwrap=document.getElementById('umap-bwrap-'+modelId);if(bwrap)bwrap.style.display='none';es.close()}};es.onerror=function(){var bwrap=document.getElementById('umap-bwrap-'+modelId);if(bwrap)bwrap.style.display='none';var c=document.getElementById('umap-scatter-'+modelId);if(c){var dpr2=window.devicePixelRatio||1;var W2=c.offsetWidth||320,H2=280;c.width=W2*dpr2;c.height=H2*dpr2;c.style.width=W2+'px';c.style.height=H2+'px';var ctx=c.getContext('2d');ctx.scale(dpr2,dpr2);ctx.clearRect(0,0,W2,H2);ctx.fillStyle='#767676';ctx.font='12px system-ui';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('UMAP unavailable',W2/2,H2/2)}es.close()}}
+    function eCloseActiveUmap(){if(window._activeUmapSrc){try{window._activeUmapSrc.close()}catch(exc){}window._activeUmapSrc=null}}
+    function eStartUmap(rawId){var modelId=rawId.replace(/[^a-zA-Z0-9_-]/g,'');var wrap=document.getElementById('umap-wrap-'+modelId);var bar=document.getElementById('umap-bar-'+modelId);if(!wrap)return;eCloseActiveUmap();var es=new EventSource('/api/visualization/umap/stream?model_id='+encodeURIComponent(rawId));window._activeUmapSrc=es;es.onmessage=function(e){var d;try{d=JSON.parse(e.data)}catch(ex){return}if(d.error){if(wrap){wrap.textContent='UMAP: '+d.error}es.close();if(window._activeUmapSrc===es)window._activeUmapSrc=null;return}if(bar)bar.style.width=Math.round((d.progress||0)*100)+'%';eUmapScatter(modelId,d.task_type,d.points,d.value_range,d.done);if(d.done){var bwrap=document.getElementById('umap-bwrap-'+modelId);if(bwrap)bwrap.style.display='none';es.close();if(window._activeUmapSrc===es)window._activeUmapSrc=null}};es.onerror=function(){var bwrap=document.getElementById('umap-bwrap-'+modelId);if(bwrap)bwrap.style.display='none';var c=document.getElementById('umap-scatter-'+modelId);if(c){var dpr2=window.devicePixelRatio||1;var W2=c.offsetWidth||320,H2=280;c.width=W2*dpr2;c.height=H2*dpr2;c.style.width=W2+'px';c.style.height=H2+'px';var ctx=c.getContext('2d');ctx.scale(dpr2,dpr2);ctx.clearRect(0,0,W2,H2);ctx.fillStyle='#767676';ctx.font='12px system-ui';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('UMAP unavailable',W2/2,H2/2)}es.close();if(window._activeUmapSrc===es)window._activeUmapSrc=null}}
     var eAMLStart=0;
     function eRunAutoML(){if(!eData)return;var target=$('e-automl-target').value;if(!target){eNotify('Select a target column','err');return}eAMLStart=Date.now();$('e-btn-automl').disabled=true;$('e-btn-automl').innerHTML='<span class="spinner"></span> Running...';$('e-automl-progress').style.display='block';$('e-automl-result').style.display='none';$('e-aml-status').innerHTML=eProgressRing(0,36)+'<span style="margin-left:8px">Starting pipeline...</span>';$('e-aml-bar').style.width='0%';var body={target_column:target};var tt=$('e-aml-task').value;if(tt)body.task_type=tt;var sc=$('e-aml-scaler').value;if(sc)body.scaler=sc;body.max_models=parseInt($('e-aml-max').value)||8;body.hyperopt_trials=parseInt($('e-aml-trials').value)||20;fetch('/api/automl/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()}).then(function(d){if(d.success&&d.job_id){eAMLPoll(d.job_id)}else{eNotify('Failed: '+(d.error||'Unknown'),'err');$('e-btn-automl').disabled=false;$('e-btn-automl').textContent='Run AutoML Pipeline';$('e-automl-progress').style.display='none'}}).catch(function(e){eNotify('Request failed: '+e,'err');$('e-btn-automl').disabled=false;$('e-btn-automl').textContent='Run AutoML Pipeline';$('e-automl-progress').style.display='none'})}
     function eAMLPoll(id){fetch('/api/automl/status/'+id).then(function(r){return r.json()}).then(function(d){var pct=Math.round(d.progress||0);$('e-aml-bar').style.width=pct+'%';var msg=d.message||d.status;var step=0;if(pct>10)step=1;if(pct>30)step=2;if(pct>60)step=3;if(pct>90)step=4;$('e-aml-status').innerHTML='<div style="display:flex;align-items:center;gap:10px">'+eProgressRing(pct/100,36)+'<div><div style="font-weight:600;font-size:13px">'+msg+'</div><div class="tp-elapsed">'+eElapsed(eAMLStart)+' &middot; '+pct+'%</div></div></div>'+eStepBar(['Detect','Preprocess','Train','Optimize','Evaluate'],step);if(d.status==='completed'){$('e-automl-progress').style.display='none';$('e-btn-automl').disabled=false;$('e-btn-automl').textContent='Run AutoML Pipeline';var r=d.result||{};$('e-aml-best').textContent=r.best_model||'—';$('e-aml-score').textContent=(r.metric||'Score')+': '+(r.best_score!=null?r.best_score.toFixed(4):'—');var lb=r.leaderboard||[];var h='<table><thead><tr><th>#</th><th>Model</th><th>Score</th><th>Time</th></tr></thead><tbody>';lb.forEach(function(e,i){h+='<tr><td>'+(i+1)+'</td><td>'+e.model+'</td><td class="mono">'+(e.score!=null?parseFloat(e.score).toFixed(4):'Err')+'</td><td class="mono">'+(e.training_time_secs!=null?e.training_time_secs.toFixed(2)+'s':'—')+'</td></tr>'});h+='</tbody></table>';$('e-aml-leaderboard').innerHTML=h;$('e-automl-result').style.display='block';if(lb.length>0){$('e-aml-chart-wrap').style.display='block';var ci=[];lb.forEach(function(e){var sc=parseFloat(e.score);if(sc!=null&&sc>0)ci.push({label:e.model,value:sc})});ci.sort(function(a,b){return b.value-a.value});eDrawBars('e-aml-chart',ci,{label:'Model Score'})}eNotify('AutoML done! Best: '+r.best_model,'ok');eLogActivity('AutoML completed: best model '+r.best_model);eHistPush({type:'AutoML',model:r.best_model||'—',metrics:{score:r.best_score,metric:r.metric,models:r.leaderboard?r.leaderboard.length:0},target:$('e-automl-target').value,task:'auto',ts:Date.now()});eDashModels();fetch('/api/models').then(function(r){return r.json()}).then(function(md){var mds=md.models||[];if(mds.length>0)eQualityFetch(mds[mds.length-1].id,'e-quality-panel-aml')}).catch(function(){})}else if(d.status==='failed'){$('e-automl-progress').style.display='none';$('e-btn-automl').disabled=false;$('e-btn-automl').textContent='Run AutoML Pipeline';eNotify('AutoML failed: '+d.message,'err')}else{var pr=d.partial_results;if(pr&&pr.length>0){$('e-aml-chart-wrap').style.display='block';var ci=[];pr.forEach(function(e){var sc=parseFloat(e.score);if(sc!=null&&sc>0)ci.push({label:e.model,value:sc})});ci.sort(function(a,b){return b.value-a.value});eDrawBars('e-aml-chart',ci,{label:'Model Score (live)'})}setTimeout(function(){eAMLPoll(id)},2000)}}).catch(function(){setTimeout(function(){eAMLPoll(id)},3000)})}
@@ -3010,7 +3149,7 @@ const EMBEDDED_INDEX_HTML: &str = r#"<!DOCTYPE html>
             $('e-quality-gauges').innerHTML=gh;
             // Warnings
             var warns=d.warnings||[];
-            if(warns.length>0){var wh='';warns.forEach(function(w){var ic=w.severity==='warning'?'ri-error-warning-line':'ri-information-line';var cls=w.severity==='warning'?'alert-warn':'alert';wh+='<div class="alert '+cls+'" style="padding:10px 14px"><i class="'+ic+'"></i><span style="font-size:13px">'+w.message+'</span></div>'});$('e-analysis-warnings').innerHTML=wh}else{$('e-analysis-warnings').innerHTML=''}
+            if(warns.length>0){var wh='';warns.forEach(function(w){var ic=w.severity==='warning'?'ri-error-warning-line':'ri-information-line';var cls=w.severity==='warning'?'alert-warn':'alert';wh+='<div class="alert '+cls+'" style="padding:10px 14px"><i class="'+ic+'"></i><span style="font-size:13px">'+escHtml(w.message)+'</span></div>'});$('e-analysis-warnings').innerHTML=wh}else{$('e-analysis-warnings').innerHTML=''}
             // Column stats table
             var cs=d.column_stats||[];
             if(cs.length>0){
@@ -3169,10 +3308,10 @@ const EMBEDDED_INDEX_HTML: &str = r#"<!DOCTYPE html>
         uz.addEventListener('dragleave',function(){uz.classList.remove('dragover')});
         uz.addEventListener('drop',function(e){e.preventDefault();uz.classList.remove('dragover');if(e.dataTransfer.files.length){$('e-file-input').files=e.dataTransfer.files;eFileUpload($('e-file-input'))}});
     });
-    function eDashModels(){fetch('/api/models').then(function(r){return r.json()}).then(function(d){var models=d.models||[];$('e-dash-models').textContent=models.length;if(models.length===0){$('e-dash-model-list').innerHTML='<div class="empty">No models trained yet. Load data and run training to get started.</div>';return}var h='<table><thead><tr><th>Model</th><th>Type</th><th>Created</th></tr></thead><tbody>';models.forEach(function(m){h+='<tr><td style="font-weight:500">'+m.id+'</td><td><span class="badge badge-info">'+(m.model_type||'—')+'</span></td><td class="mono" style="font-size:12px;color:#404040">'+(m.created_at?new Date(m.created_at).toLocaleString():'—')+'</td></tr>'});h+='</tbody></table>';$('e-dash-model-list').innerHTML=h;if(models.length>0){eLastModelId=models[models.length-1].id;$('e-explain-btn').disabled=false}}).catch(function(){$('e-dash-model-list').innerHTML='<div class="empty" style="color:#767676">Could not load models</div>'})}
+    function eDashModels(){fetch('/api/models').then(function(r){return r.json()}).then(function(d){var models=d.models||[];$('e-dash-models').textContent=models.length;if(models.length===0){$('e-dash-model-list').innerHTML='<div class="empty">No models trained yet. Load data and run training to get started.</div>';return}var h='<table><thead><tr><th>Model</th><th>Type</th><th>Created</th></tr></thead><tbody>';models.forEach(function(m){h+='<tr><td style="font-weight:500">'+escHtml(m.id)+'</td><td><span class="badge badge-info">'+escHtml(m.model_type||'—')+'</span></td><td class="mono" style="font-size:12px;color:#404040">'+(m.created_at?new Date(m.created_at).toLocaleString():'—')+'</td></tr>'});h+='</tbody></table>';$('e-dash-model-list').innerHTML=h;if(models.length>0){if(!eLastModelId)eLastModelId=models[models.length-1].id;$('e-explain-btn').disabled=false}}).catch(function(){$('e-dash-model-list').innerHTML='<div class="empty" style="color:#767676">Could not load models</div>'})}
     var eTrainHistory=[];
     var eActivityLog=[];
-    function eLogActivity(msg){var now=new Date();eActivityLog.unshift({time:now,msg:msg});if(eActivityLog.length>50)eActivityLog.length=50;var h='<div style="display:flex;flex-direction:column;gap:1px">';eActivityLog.forEach(function(a){h+='<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #f0f0f0"><span class="mono" style="font-size:11px;color:#767676;flex-shrink:0">'+a.time.toLocaleTimeString()+'</span><span style="font-size:13px">'+a.msg+'</span></div>'});h+='</div>';$('e-dash-activity').innerHTML=h}
+    function eLogActivity(msg){var now=new Date();eActivityLog.unshift({time:now,msg:msg});if(eActivityLog.length>50)eActivityLog.length=50;var h='<div style="display:flex;flex-direction:column;gap:1px">';eActivityLog.forEach(function(a){h+='<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #f0f0f0"><span class="mono" style="font-size:11px;color:#767676;flex-shrink:0">'+a.time.toLocaleTimeString()+'</span><span style="font-size:13px">'+escHtml(a.msg)+'</span></div>'});h+='</div>';$('e-dash-activity').innerHTML=h}
     function eHistPush(run){eTrainHistory.push(run);if(eTrainHistory.length>100)eTrainHistory.shift();var p=$('esp-train-history');if(p&&p.classList.contains('active'))eHistLoad()}
     function eHistScore(r){var m=r.metrics||{};var ks=['accuracy','f1','r2','auc','roc_auc','score','best_score'];for(var i=0;i<ks.length;i++){if(typeof m[ks[i]]==='number'&&isFinite(m[ks[i]]))return m[ks[i]]}var vs=Object.values(m).filter(function(v){return typeof v==='number'&&isFinite(v)});return vs.length?vs[0]:null}
     function eHistLoad(){if(!eTrainHistory.length){$('e-hist-empty').style.display='block';$('e-hist-content').style.display='none';return}$('e-hist-empty').style.display='none';$('e-hist-content').style.display='block';eHistDraw();var tc={Single:'#121212',AutoML:'#404040','Auto-Tune':'#6b6b6b',HyperOpt:'#121212',Ensemble:'#121212'};var wrap=$('e-hist-table');while(wrap.firstChild)wrap.removeChild(wrap.firstChild);var tbl=document.createElement('table');var th=tbl.createTHead();var hr=th.insertRow();['#','Type','Model','Score','Target','Time'].forEach(function(t){var cell=document.createElement('th');cell.textContent=t;hr.appendChild(cell)});var tb=tbl.createTBody();eTrainHistory.slice().reverse().forEach(function(r,i){var idx=eTrainHistory.length-1-i;var sc=eHistScore(r);var col=tc[r.type]||'#404040';var ts=new Date(r.ts);var row=tb.insertRow();row.style.cursor='pointer';row.onclick=(function(x){return function(){eHistDetail(x)}})(idx);var c0=row.insertCell();c0.textContent=String(idx+1);c0.style.cssText='color:#767676;font-size:12px';var c1=row.insertCell();var bdg=document.createElement('span');bdg.className='badge';bdg.style.background=col+'18';bdg.style.color=col;bdg.textContent=r.type;c1.appendChild(bdg);var c2=row.insertCell();c2.textContent=r.model;c2.style.fontWeight='500';var c3=row.insertCell();c3.textContent=sc!==null?sc.toFixed(4):'—';c3.className='mono';c3.style.color=sc>=0.9?'#404040':sc>=0.7?'#6b6b6b':'inherit';var c4=row.insertCell();c4.textContent=r.target||'—';c4.style.cssText='color:#404040;font-size:12px';var c5=row.insertCell();c5.textContent=ts.toLocaleTimeString();c5.className='mono';c5.style.cssText='font-size:11px;color:#767676'});wrap.appendChild(tbl);var leg=$('e-hist-legend');while(leg.firstChild)leg.removeChild(leg.firstChild);var seen={};eTrainHistory.forEach(function(r){seen[r.type]=tc[r.type]||'#404040'});Object.keys(seen).forEach(function(t){var d=document.createElement('div');d.style.cssText='display:flex;align-items:center;gap:5px';var dot=document.createElement('div');dot.style.cssText='width:10px;height:10px;border-radius:50%;background:'+seen[t];var sp=document.createElement('span');sp.textContent=t;d.appendChild(dot);d.appendChild(sp);leg.appendChild(d)})}
@@ -3181,7 +3320,7 @@ const EMBEDDED_INDEX_HTML: &str = r#"<!DOCTYPE html>
     function eHistClear(){eTrainHistory=[];$('e-hist-detail').style.display='none';eHistLoad()}
     function eDashTrainResult(model,metrics){var h='<div style="background:#f0f0f0;border-radius:0;padding:12px;margin-bottom:12px"><div style="font-size:14px;font-weight:600;margin-bottom:4px"><i class="ri-check-line" style="color:#404040"></i> '+model+'</div></div>';h+='<table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>';Object.keys(metrics).forEach(function(k){h+='<tr><td>'+k+'</td><td class="mono">'+(typeof metrics[k]==='number'?metrics[k].toFixed(4):metrics[k])+'</td></tr>'});h+='</tbody></table>';$('e-dash-train-result').innerHTML=h}
     var eRptModels=[];
-    function eLoadReport(){fetch('/api/models').then(function(r){return r.json()}).then(function(d){eRptModels=d.models||[];if(eRptModels.length===0){$('e-rpt-nomodels').style.display='flex';$('e-rpt-select').style.display='none';return}$('e-rpt-nomodels').style.display='none';$('e-rpt-select').style.display='block';var h='';eRptModels.forEach(function(m,i){h+='<label class="chk-item"><input type="checkbox" value="'+m.id+'" checked> '+(m.name||m.id)+'</label>'});$('e-rpt-models').innerHTML=h}).catch(function(){$('e-rpt-nomodels').style.display='flex';$('e-rpt-select').style.display='none'})}
+    function eLoadReport(){fetch('/api/models').then(function(r){return r.json()}).then(function(d){eRptModels=d.models||[];if(eRptModels.length===0){$('e-rpt-nomodels').style.display='flex';$('e-rpt-select').style.display='none';return}$('e-rpt-nomodels').style.display='none';$('e-rpt-select').style.display='block';var h='';eRptModels.forEach(function(m,i){h+='<label class="chk-item"><input type="checkbox" value="'+escHtml(m.id)+'" checked> '+escHtml(m.name||m.id)+'</label>'});$('e-rpt-models').innerHTML=h}).catch(function(){$('e-rpt-nomodels').style.display='flex';$('e-rpt-select').style.display='none'})}
     function eRptSelectAll(val){document.querySelectorAll('#e-rpt-models input').forEach(function(cb){cb.checked=val})}
     function eRptBack(){$('e-rpt-content').style.display='none';$('e-rpt-empty').style.display='block';eLoadReport()}
     function eRptPrint(){window.print()}
@@ -3231,7 +3370,17 @@ const EMBEDDED_INDEX_HTML: &str = r#"<!DOCTYPE html>
           }
           eInsConceptsLoad(d);
         })
-        .catch(function(e) { console.error('Insights load failed', e); });
+        .catch(function(e) {
+          console.error('Insights load failed', e);
+          eNotify('Failed to load insights: ' + (e && e.message ? e.message : 'network error'), 'err');
+          var stContent = document.getElementById('e-ins-st-content');
+          var stUnsupported = document.getElementById('e-ins-st-unsupported');
+          if (stContent) stContent.style.display = 'none';
+          if (stUnsupported) {
+            stUnsupported.style.display = 'block';
+            stUnsupported.textContent = 'Could not load insights data. Please try again.';
+          }
+        });
     }
     function eInsStDraw() {
       var stepEl = document.getElementById('e-ins-st-step');
@@ -4790,6 +4939,8 @@ pub struct CleanRequest {
     /// Trim whitespace from string columns (default: true)
     #[allow(dead_code)]
     trim_whitespace: Option<bool>,
+    /// Which dataset to clean. Defaults to the current dataset when omitted.
+    dataset_id: Option<String>,
 }
 
 /// Auto-clean the currently loaded dataset
@@ -4797,13 +4948,7 @@ pub async fn auto_clean_data(
     State(state): State<Arc<AppState>>,
     Json(request): Json<CleanRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    // Read and clone, drop lock before CPU-bound cleaning
-    let df = {
-        let data = state.current_data.read().await;
-        data.as_ref()
-            .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?
-            .clone()
-    };
+    let (dataset_id, df) = state.resolve_dataset_with_id(request.dataset_id.as_deref()).await?;
 
     let original_rows = df.height();
     let original_cols = df.width();
@@ -4885,8 +5030,8 @@ pub async fn auto_clean_data(
         "Auto-clean completed"
     );
 
-    // Re-acquire write lock to store cleaned data
-    *state.current_data.write().await = Some(cleaned);
+    // Write the cleaned data back to the dataset it came from.
+    state.update_dataset_frame(&dataset_id, cleaned).await;
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -5041,7 +5186,17 @@ pub async fn quantize_data(
         body.get("data").cloned().ok_or_else(|| ServerError::BadRequest("missing 'data' field".into()))?
     ).map_err(|e| ServerError::BadRequest(format!("invalid data format: {}", e)))?;
 
-    let bits = body.get("bits").and_then(|v| v.as_u64()).unwrap_or(8) as u8;
+    let bits_raw = body.get("bits").and_then(|v| v.as_u64()).unwrap_or(8);
+    // Validate range before narrowing to u8/using it: downstream (quantizer.rs) computes
+    // `1i32 << (num_bits - 1)`, which underflows for `bits == 0` (wraps to 255 in a u8
+    // subtraction since overflow-checks are disabled in release), producing silently
+    // wrong quantization. Reject anything outside a sane bit-width range up front.
+    if bits_raw < 1 || bits_raw > 16 {
+        return Err(ServerError::BadRequest(format!(
+            "'bits' must be between 1 and 16, got {}", bits_raw
+        )));
+    }
+    let bits = bits_raw as u8;
 
     let quantization_type = match body.get("quantization_type").and_then(|v| v.as_str()).unwrap_or("int8") {
         "uint8" => QuantizationType::UInt8,
@@ -5392,6 +5547,8 @@ pub struct HyperOptRequest {
     direction: Option<String>,
     #[allow(dead_code)]
     metric: Option<String>,
+    /// Which dataset to optimize on. Defaults to the current dataset when omitted.
+    dataset_id: Option<String>,
 }
 
 /// Run hyperparameter optimization with HyperOptX
@@ -5401,14 +5558,31 @@ pub async fn run_hyperopt(
 ) -> Result<Json<serde_json::Value>> {
     use crate::optimizer::{HyperOptX, OptimizationConfig, SamplerType, OptimizeDirection, ParameterValue};
 
-    let data = state.current_data.read().await;
-    let df = data.as_ref()
-        .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?
-        .clone();
+    let (dataset_id, df) = state.resolve_dataset_with_id(request.dataset_id.as_deref()).await?;
 
     let task_type = parse_task_type(&request.task_type)?;
     let model_type = parse_model_type(&request.model_type)?;
     let target_column = request.target_column.clone();
+
+    // Idempotency: dedupe on (dataset_id, target_column, task_type, model_type,
+    // n_trials) so a retried/duplicated request doesn't launch a second identical
+    // hyperopt run.
+    let fingerprint = compute_job_fingerprint("hyperopt", Some(&dataset_id), &serde_json::json!({
+        "target_column": request.target_column,
+        "task_type": request.task_type,
+        "model_type": request.model_type,
+        "n_trials": request.n_trials,
+        "sampler": request.sampler,
+        "direction": request.direction,
+    }));
+    if let Some(existing) = find_in_flight_job_by_fingerprint(&state, &fingerprint).await {
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "job_id": existing.id,
+            "message": "An identical hyperopt job is already in progress",
+            "deduplicated": true,
+        })));
+    }
 
     let job_id = AppState::generate_id();
     let job_id_clone = job_id.clone();
@@ -5430,6 +5604,7 @@ pub async fn run_hyperopt(
         }),
         created_at: chrono::Utc::now(),
         model_path: None,
+        fingerprint: Some(fingerprint),
     };
     state.jobs.write().await.insert(job_id.clone(), job);
 
@@ -5448,8 +5623,9 @@ pub async fn run_hyperopt(
     let task_type_name = request.task_type.clone();
     let _models_dir = state.config.models_dir.clone();
     let state_clone = state.clone();
+    let job_id_for_handle = job_id.clone();
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let model_type_for_history = model_type_name.clone();
         let task_type_for_history = task_type_name.clone();
         let result = tokio::task::spawn_blocking(move || {
@@ -5615,6 +5791,7 @@ pub async fn run_hyperopt(
             }
         }
     });
+    state.job_handles.insert(job_id_for_handle, handle);
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -5767,6 +5944,8 @@ pub struct EnsembleRequest {
     models: Vec<String>,
     strategy: Option<String>,
     weights: Option<Vec<f64>>,
+    /// Which dataset to train the ensemble on. Defaults to the current dataset when omitted.
+    dataset_id: Option<String>,
 }
 
 /// Train an ensemble of models
@@ -5774,12 +5953,36 @@ pub async fn train_ensemble(
     State(state): State<Arc<AppState>>,
     Json(request): Json<EnsembleRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    let data = state.current_data.read().await;
-    let df = data.as_ref()
-        .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?
-        .clone();
+    if request.models.len() > MAX_MODELS_PER_REQUEST {
+        return Err(ServerError::BadRequest(format!(
+            "Too many models requested: {} (max {})",
+            request.models.len(),
+            MAX_MODELS_PER_REQUEST
+        )));
+    }
+
+    let (dataset_id, df) = state.resolve_dataset_with_id(request.dataset_id.as_deref()).await?;
 
     let task_type = parse_task_type(&request.task_type)?;
+
+    // Idempotency: dedupe on (dataset_id, target_column, task_type, models, strategy)
+    // so a retried/duplicated request doesn't launch a second identical ensemble run.
+    let fingerprint = compute_job_fingerprint("ensemble", Some(&dataset_id), &serde_json::json!({
+        "target_column": request.target_column,
+        "task_type": request.task_type,
+        "models": request.models,
+        "strategy": request.strategy,
+        "weights": request.weights,
+    }));
+    if let Some(existing) = find_in_flight_job_by_fingerprint(&state, &fingerprint).await {
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "job_id": existing.id,
+            "message": "An identical ensemble training job is already in progress",
+            "deduplicated": true,
+        })));
+    }
+
     let job_id = AppState::generate_id();
     let job_id_clone = job_id.clone();
 
@@ -5806,6 +6009,7 @@ pub async fn train_ensemble(
         }),
         created_at: chrono::Utc::now(),
         model_path: None,
+        fingerprint: Some(fingerprint),
     };
     state.jobs.write().await.insert(job_id.clone(), job);
 
@@ -5814,8 +6018,9 @@ pub async fn train_ensemble(
     let model_names = request.models.clone();
     let strategy = request.strategy.clone().unwrap_or_else(|| "voting".to_string());
     let weights = request.weights.clone();
+    let job_id_for_handle = job_id.clone();
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let start = std::time::Instant::now();
         let mut model_results: Vec<serde_json::Value> = Vec::new();
         let mut all_predictions: Vec<ndarray::Array1<f64>> = Vec::new();
@@ -5910,6 +6115,7 @@ pub async fn train_ensemble(
             job.status = JobStatus::Completed { metrics };
         }
     });
+    state.job_handles.insert(job_id_for_handle, handle);
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -6086,6 +6292,8 @@ pub struct AnomalyRequest {
     contamination: Option<f64>,
     n_estimators: Option<usize>,
     columns: Option<Vec<String>>,
+    /// Which dataset to scan. Defaults to the current dataset when omitted.
+    dataset_id: Option<String>,
 }
 
 /// Detect anomalies in the loaded dataset
@@ -6095,9 +6303,8 @@ pub async fn detect_anomalies(
 ) -> Result<Json<serde_json::Value>> {
     use crate::anomaly::{IsolationForest, AnomalyDetector};
 
-    let data = state.current_data.read().await;
-    let df = data.as_ref()
-        .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?;
+    let df = state.resolve_dataset(request.dataset_id.as_deref()).await?;
+    let df = &df;
 
     // Select numeric columns only
     let cols: Vec<String> = if let Some(ref selected) = request.columns {
@@ -6186,6 +6393,8 @@ pub struct ClusterRequest {
     pub eps: Option<f64>,
     pub min_samples: Option<usize>,
     pub columns: Option<Vec<String>>,
+    /// Which dataset to cluster. Defaults to the current dataset when omitted.
+    pub dataset_id: Option<String>,
 }
 
 /// Run clustering on loaded dataset
@@ -6195,9 +6404,8 @@ pub async fn run_clustering(
 ) -> Result<Json<serde_json::Value>> {
     use crate::training::clustering::{KMeans, DBSCAN};
 
-    let data = state.current_data.read().await;
-    let df = data.as_ref()
-        .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?;
+    let df = state.resolve_dataset(request.dataset_id.as_deref()).await?;
+    let df = &df;
 
     // Select numeric columns
     let cols: Vec<String> = if let Some(ref selected) = request.columns {
@@ -6314,11 +6522,38 @@ pub async fn run_clustering(
 // UMAP Visualization Handler
 // ============================================================================
 
+/// Maximum rows sampled for the synchronous UMAP/PCA visualization endpoints. Mirrors
+/// the clamp already applied on the SSE streaming UMAP endpoint (`max_samples.min(10_000)`,
+/// see `umap_stream_handler`), so these endpoints can't be made to run an unbounded
+/// O(n^2)-ish embedding computation over an entire large dataset and OOM/hang the server.
+const MAX_VISUALIZATION_SAMPLES: usize = 10_000;
+
+/// Randomly (order-preserving) sample up to `max_samples` rows from `df`. If the
+/// dataframe already has fewer rows, it is returned unchanged (cloned). Uses the same
+/// shuffle-then-sort-indices approach as `umap_stream_handler`.
+fn sample_dataframe_for_visualization(df: &DataFrame, max_samples: usize) -> Result<DataFrame> {
+    let n = df.height();
+    if n <= max_samples {
+        return Ok(df.clone());
+    }
+    use rand::seq::SliceRandom;
+    let mut rng = rand::thread_rng();
+    let mut idx: Vec<polars::prelude::IdxSize> = (0..n as polars::prelude::IdxSize).collect();
+    idx.shuffle(&mut rng);
+    idx.truncate(max_samples);
+    idx.sort_unstable();
+    let idx_ca = polars::prelude::IdxCa::from_vec("idx".into(), idx);
+    Ok(df.take(&idx_ca)?)
+}
+
 #[derive(Deserialize)]
 pub struct UmapRequest {
     pub n_neighbors: Option<usize>,
     pub min_dist: Option<f64>,
     pub color_by: Option<String>,
+    pub max_samples: Option<usize>,
+    /// Which dataset to project. Defaults to the current dataset when omitted.
+    pub dataset_id: Option<String>,
 }
 
 /// Run UMAP dimensionality reduction on the loaded dataset
@@ -6328,9 +6563,8 @@ pub async fn generate_umap(
 ) -> Result<Json<serde_json::Value>> {
     use crate::visualization::umap::{Umap, UmapConfig};
 
-    let data = state.current_data.read().await;
-    let df = data.as_ref()
-        .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?;
+    let df = state.resolve_dataset(request.dataset_id.as_deref()).await?;
+    let df = &df;
 
     // Extract numeric columns
     let numeric_cols: Vec<String> = df.get_columns().iter()
@@ -6342,12 +6576,19 @@ pub async fn generate_umap(
         return Err(ServerError::BadRequest("UMAP requires at least 2 numeric columns".to_string()));
     }
 
-    let n_rows = df.height();
-    if n_rows < 3 {
+    let n_rows_total = df.height();
+    if n_rows_total < 3 {
         return Err(ServerError::BadRequest("UMAP requires at least 3 samples".to_string()));
     }
 
+    // Clamp sample count to prevent OOM/unbounded compute on large datasets, mirroring
+    // the streaming UMAP endpoint's `max_samples.min(10_000)` clamp.
+    let max_samples = request.max_samples.unwrap_or(MAX_VISUALIZATION_SAMPLES).min(MAX_VISUALIZATION_SAMPLES);
+    let sampled_df = sample_dataframe_for_visualization(df, max_samples)?;
+    let df = &sampled_df;
+
     // Build data matrix (Vec<Vec<f64>>)
+    let n_rows = df.height();
     let mut matrix: Vec<Vec<f64>> = Vec::with_capacity(n_rows);
     for i in 0..n_rows {
         let mut row = Vec::with_capacity(numeric_cols.len());
@@ -6447,6 +6688,9 @@ pub async fn generate_umap(
 pub struct PcaRequest {
     pub color_by: Option<String>,
     pub scale: Option<bool>,
+    pub max_samples: Option<usize>,
+    /// Which dataset to project. Defaults to the current dataset when omitted.
+    pub dataset_id: Option<String>,
 }
 
 /// Run PCA dimensionality reduction on the loaded dataset
@@ -6456,9 +6700,8 @@ pub async fn generate_pca(
 ) -> Result<Json<serde_json::Value>> {
     use crate::visualization::pca::{Pca, PcaConfig};
 
-    let data = state.current_data.read().await;
-    let df = data.as_ref()
-        .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?;
+    let df = state.resolve_dataset(request.dataset_id.as_deref()).await?;
+    let df = &df;
 
     // Extract numeric columns
     let numeric_cols: Vec<String> = df.get_columns().iter()
@@ -6470,12 +6713,19 @@ pub async fn generate_pca(
         return Err(ServerError::BadRequest("PCA requires at least 2 numeric columns".to_string()));
     }
 
-    let n_rows = df.height();
-    if n_rows < 2 {
+    let n_rows_total = df.height();
+    if n_rows_total < 2 {
         return Err(ServerError::BadRequest("PCA requires at least 2 samples".to_string()));
     }
 
+    // Clamp sample count to prevent OOM/unbounded compute on large datasets, mirroring
+    // the streaming UMAP endpoint's `max_samples.min(10_000)` clamp.
+    let max_samples = request.max_samples.unwrap_or(MAX_VISUALIZATION_SAMPLES).min(MAX_VISUALIZATION_SAMPLES);
+    let sampled_df = sample_dataframe_for_visualization(df, max_samples)?;
+    let df = &sampled_df;
+
     // Build data matrix
+    let n_rows = df.height();
     let mut matrix: Vec<Vec<f64>> = Vec::with_capacity(n_rows);
     for i in 0..n_rows {
         let mut row = Vec::with_capacity(numeric_cols.len());
@@ -6679,6 +6929,8 @@ pub struct AutoTuneRequest {
     target_column: String,
     task_type: String,
     max_models: Option<usize>,
+    /// Which dataset to auto-tune against. Defaults to the current dataset when omitted.
+    dataset_id: Option<String>,
 }
 
 /// Automatically select the best model for the dataset
@@ -6686,13 +6938,26 @@ pub async fn auto_tune(
     State(state): State<Arc<AppState>>,
     Json(request): Json<AutoTuneRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    let data = state.current_data.read().await;
-    let df = data.as_ref()
-        .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?
-        .clone();
+    let (dataset_id, df) = state.resolve_dataset_with_id(request.dataset_id.as_deref()).await?;
 
     let task_type = parse_task_type(&request.task_type)?;
     let target_column = request.target_column.clone();
+
+    // Idempotency: dedupe on (dataset_id, target_column, task_type, max_models) so a
+    // retried/duplicated request doesn't launch a second identical auto-tune sweep.
+    let fingerprint = compute_job_fingerprint("auto_tune", Some(&dataset_id), &serde_json::json!({
+        "target_column": request.target_column,
+        "task_type": request.task_type,
+        "max_models": request.max_models,
+    }));
+    if let Some(existing) = find_in_flight_job_by_fingerprint(&state, &fingerprint).await {
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "job_id": existing.id,
+            "message": "An identical auto-tune job is already in progress",
+            "deduplicated": true,
+        })));
+    }
 
     let job_id = AppState::generate_id();
     let job_id_clone = job_id.clone();
@@ -6711,14 +6976,16 @@ pub async fn auto_tune(
         }),
         created_at: chrono::Utc::now(),
         model_path: None,
+        fingerprint: Some(fingerprint),
     };
     state.jobs.write().await.insert(job_id.clone(), job);
 
     let state_clone = state.clone();
     let models_dir = state.config.models_dir.clone();
     let max_models = request.max_models;
+    let job_id_for_handle = job_id.clone();
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let candidates: Vec<(&str, ModelType)> = match task_type {
             TaskType::BinaryClassification | TaskType::MultiClassification => vec![
                 ("random_forest", ModelType::RandomForest),
@@ -6923,6 +7190,7 @@ pub async fn auto_tune(
             job.status = JobStatus::Completed { metrics };
         }
     });
+    state.job_handles.insert(job_id_for_handle, handle);
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -6946,6 +7214,8 @@ pub struct AutoMLRequest {
     pub hyperopt_trials: Option<usize>,  // default 20, 0 to skip
     pub cv_folds: Option<usize>,         // default 5
     pub time_budget_secs: Option<u64>,   // optional time limit
+    /// Which dataset to run the pipeline on. Defaults to the current dataset when omitted.
+    pub dataset_id: Option<String>,
 }
 
 /// Run a full end-to-end AutoML pipeline: detect → preprocess → train → optimize → report
@@ -6959,16 +7229,39 @@ pub async fn run_automl_pipeline(
     let hyperopt_trials = request.hyperopt_trials.unwrap_or(20);
     let time_budget_secs = request.time_budget_secs.unwrap_or(0);
 
-    // Validate data exists
-    let data = state.current_data.read().await;
-    let df = data.as_ref()
-        .ok_or_else(|| ServerError::NotFound("No data loaded. Upload a dataset first.".to_string()))?
-        .clone();
-    drop(data);
+    // Validate data exists. Preserve the specific "dataset not found" 404 for an
+    // explicit (but unknown) dataset_id; only fall back to the friendlier default
+    // message when no dataset_id was given and there's no current dataset either.
+    let (dataset_id, df) = match request.dataset_id.as_deref() {
+        Some(id) => state.resolve_dataset_with_id(Some(id)).await?,
+        None => state.resolve_dataset_with_id(None).await
+            .map_err(|_| ServerError::NotFound("No data loaded. Upload a dataset first.".to_string()))?,
+    };
 
     // Validate target column exists
     if df.column(&target_column).is_err() {
         return Err(ServerError::BadRequest(format!("Target column '{}' not found", target_column)));
+    }
+
+    // Idempotency: dedupe on (dataset_id, target_column, and the rest of the request
+    // body) so a retried/duplicated request doesn't launch a second identical pipeline.
+    let fingerprint = compute_job_fingerprint("automl_pipeline", Some(&dataset_id), &serde_json::json!({
+        "target_column": request.target_column,
+        "task_type": request.task_type,
+        "scaler": request.scaler,
+        "imputation": request.imputation,
+        "models": request.models,
+        "max_models": request.max_models,
+        "hyperopt_trials": request.hyperopt_trials,
+        "cv_folds": request.cv_folds,
+    }));
+    if let Some(existing) = find_in_flight_job_by_fingerprint(&state, &fingerprint).await {
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "job_id": existing.id,
+            "message": "An identical AutoML pipeline run is already in progress",
+            "deduplicated": true,
+        })));
     }
 
     // Create job for tracking
@@ -6988,6 +7281,7 @@ pub async fn run_automl_pipeline(
         }),
         created_at: chrono::Utc::now(),
         model_path: None,
+        fingerprint: Some(fingerprint),
     };
     state.jobs.write().await.insert(job_id.clone(), job);
 
@@ -7061,8 +7355,9 @@ pub async fn run_automl_pipeline(
         let mut preprocessor = DataPreprocessor::with_config(config);
         match preprocessor.fit_transform(&df) {
             Ok(processed) => {
-                // Use preprocessed data for training but do NOT overwrite the
-                // user's original current_data — that would corrupt their data.
+                // Use preprocessed data for training but do NOT write it back to
+                // `dataset_frames` for `dataset_id` — that would silently mutate the
+                // user's original stored dataset out from under them.
                 processed
             }
             Err(e) => {
@@ -7168,8 +7463,9 @@ pub async fn run_automl_pipeline(
     let job_id_clone = job_id.clone();
     let df_clone = preprocessed_df.clone();
     let target_clone = target_column.clone();
+    let job_id_for_handle = job_id.clone();
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_TRAINS));
         let partial = Arc::new(tokio::sync::Mutex::new(Vec::<serde_json::Value>::new()));
@@ -7429,6 +7725,7 @@ pub async fn run_automl_pipeline(
             );
         }
     });
+    state.job_handles.insert(job_id_for_handle, handle);
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -7525,19 +7822,35 @@ pub struct ApplyBestRequest {
     task_type: String,
     model_type: String,
     params: serde_json::Value,
+    /// Which dataset to train the final model on. Defaults to the current dataset when omitted.
+    dataset_id: Option<String>,
 }
 
 pub async fn apply_best_params(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ApplyBestRequest>,
 ) -> Result<Json<serde_json::Value>> {
-    let data = state.current_data.read().await;
-    let df = data.as_ref()
-        .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?
-        .clone();
+    let (dataset_id, df) = state.resolve_dataset_with_id(request.dataset_id.as_deref()).await?;
 
     let task_type = parse_task_type(&request.task_type)?;
     let model_type = parse_model_type(&request.model_type)?;
+
+    // Idempotency: dedupe on (dataset_id, target_column, task_type, model_type,
+    // params) so a retried/duplicated request doesn't launch a second identical run.
+    let fingerprint = compute_job_fingerprint("apply_best_params", Some(&dataset_id), &serde_json::json!({
+        "target_column": request.target_column,
+        "task_type": request.task_type,
+        "model_type": request.model_type,
+        "params": request.params,
+    }));
+    if let Some(existing) = find_in_flight_job_by_fingerprint(&state, &fingerprint).await {
+        return Ok(Json(serde_json::json!({
+            "success": true,
+            "job_id": existing.id,
+            "message": "An identical optimized-training job is already in progress",
+            "deduplicated": true,
+        })));
+    }
 
     let job_id = AppState::generate_id();
     let job_id_clone = job_id.clone();
@@ -7557,6 +7870,7 @@ pub async fn apply_best_params(
         }),
         created_at: chrono::Utc::now(),
         model_path: None,
+        fingerprint: Some(fingerprint),
     };
     state.jobs.write().await.insert(job_id.clone(), job);
 
@@ -7565,8 +7879,9 @@ pub async fn apply_best_params(
     let params = request.params.clone();
     let models_dir = state.config.models_dir.clone();
     let model_type_str = request.model_type.clone();
+    let job_id_for_handle = job_id.clone();
 
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let result = tokio::task::spawn_blocking(move || {
             let mut config = TrainingConfig::new(task_type.clone(), &target_col)
                 .with_model(model_type);
@@ -7651,6 +7966,7 @@ pub async fn apply_best_params(
             }
         }
     });
+    state.job_handles.insert(job_id_for_handle, handle);
 
     Ok(Json(serde_json::json!({
         "success": true,
@@ -7722,14 +8038,68 @@ pub async fn get_audit_log(
     })))
 }
 
-/// Get rate limit statistics
+#[derive(Deserialize)]
+pub struct RateLimitStatsQuery {
+    limit: Option<usize>,
+}
+
+/// Redact a rate-limit bucket's client identifier for display. `client_id` can be the
+/// caller's literal API key (see `security/middleware.rs`), so it must never be
+/// echoed back verbatim — show only the last 4 characters, enough to distinguish
+/// clients in a dashboard without leaking the credential.
+fn redact_client_id(id: &str) -> String {
+    let tail: String = id.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    if tail.len() < id.chars().count() {
+        format!("...{}", tail)
+    } else {
+        "*".repeat(tail.len().max(1))
+    }
+}
+
+/// Get rate limit statistics.
+///
+/// `rate_limiter.get_metrics()` returns up to one entry per distinct client_id ever
+/// seen (which, per the rate-limit bucket-key fix, can be a caller's raw API key) —
+/// unbounded and, until now, returned verbatim. This redacts each client id and caps
+/// how many per-client rows are returned (default 100, max 1000 — same convention as
+/// `get_audit_log`'s `limit` query param).
 pub async fn get_rate_limit_stats(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<RateLimitStatsQuery>,
 ) -> Result<Json<serde_json::Value>> {
-    let metrics = state.rate_limiter.get_metrics();
+    let limit = query.limit.unwrap_or(100).min(1000);
+    let raw_metrics = state.rate_limiter.get_metrics();
+
+    let mut totals = serde_json::Map::new();
+    // Keyed by the *raw* (unredacted) client id so distinct clients are never merged
+    // together just because their redacted display labels happen to collide.
+    let mut per_client: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+
+    for (key, value) in raw_metrics {
+        if let Some(id) = key.strip_prefix("client_").and_then(|s| s.strip_suffix("_requests")) {
+            per_client.entry(id.to_string()).or_insert((0, 0)).0 = value;
+        } else if let Some(id) = key.strip_prefix("client_").and_then(|s| s.strip_suffix("_blocked")) {
+            per_client.entry(id.to_string()).or_insert((0, 0)).1 = value;
+        } else {
+            totals.insert(key, serde_json::json!(value));
+        }
+    }
+
+    let clients_total = per_client.len();
+    let clients: Vec<serde_json::Value> = per_client.into_iter()
+        .take(limit)
+        .map(|(id, (requests, blocked))| serde_json::json!({
+            "client_id": redact_client_id(&id),
+            "requests": requests,
+            "blocked": blocked,
+        }))
+        .collect();
 
     Ok(Json(serde_json::json!({
-        "metrics": metrics,
+        "totals": totals,
+        "clients": clients,
+        "clients_returned": clients.len(),
+        "clients_total": clients_total,
     })))
 }
 
@@ -7752,18 +8122,18 @@ pub async fn get_data_lineage(
 /// Get data quality report for current dataset (ISO 5259, 25012)
 pub async fn get_data_quality(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<DatasetIdQuery>,
 ) -> Result<Json<serde_json::Value>> {
     use crate::preprocessing::quality::{DataQualityScorer, ColumnStatistics};
 
-    // Clone the DataFrame and immediately drop the read lock.
-    // This prevents blocking writers for the full duration of CPU-intensive analysis.
-    let df = {
-        let data = state.current_data.read().await;
-        data.as_ref().ok_or_else(|| {
+    // Explicit dataset_id: 404 if it isn't found (new parameter, no prior behavior to
+    // preserve). Omitted: preserve the exact old "no current dataset" status/message.
+    let df = match query.dataset_id.as_deref() {
+        Some(id) => state.resolve_dataset(Some(id)).await?,
+        None => state.resolve_dataset(None).await.map_err(|_| {
             ServerError::BadRequest("No dataset loaded. Upload data first.".to_string())
-        })?.clone()   // DataFrame clone (reference-counted column buffers)
+        })?,
     };
-    // `data` guard dropped here — lock released
 
     let num_rows = df.height();
     // Compute duplicate row count for the quality scorer
@@ -7918,13 +8288,17 @@ pub async fn get_data_quality(
 /// Get auto-generated datasheet for current dataset (ISO 5259)
 pub async fn get_data_datasheet(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<DatasetIdQuery>,
 ) -> Result<Json<serde_json::Value>> {
     use crate::export::Datasheet;
 
-    let data = state.current_data.read().await;
-    let df = data.as_ref().ok_or_else(|| {
-        ServerError::BadRequest("No dataset loaded. Upload data first.".to_string())
-    })?;
+    let df = match query.dataset_id.as_deref() {
+        Some(id) => state.resolve_dataset(Some(id)).await?,
+        None => state.resolve_dataset(None).await.map_err(|_| {
+            ServerError::BadRequest("No dataset loaded. Upload data first.".to_string())
+        })?,
+    };
+    let df = &df;
 
     let feature_names: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
     let feature_dtypes: Vec<String> = df.dtypes().iter().map(|d| format!("{:?}", d)).collect();
@@ -8229,12 +8603,17 @@ pub async fn submit_prediction_feedback(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>> {
+    // Missing/invalid model_id or prediction_id must be rejected outright — silently
+    // substituting the literal string "unknown" would write bogus-but-plausible-looking
+    // data into the audit trail and report success (200) for a bad request.
     let model_id = body.get("model_id")
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ServerError::BadRequest("model_id is required".to_string()))?;
     let prediction_id = body.get("prediction_id")
         .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ServerError::BadRequest("prediction_id is required".to_string()))?;
     let actual_value = body.get("actual_value")
         .and_then(|v| v.as_f64());
 
@@ -8333,7 +8712,11 @@ pub async fn get_insights_evaluation(
 
     let eval = match state.insights_cache.get(&model_id) {
         Some(e) => e,
-        None => return axum::Json(serde_json::json!({"error": "evaluation_data_unavailable"})).into_response(),
+        // Missing evaluation data is a "not found" condition, same as the analogous
+        // get_insights_model_structure handler — previously this returned 200 with an
+        // error body, which callers checking only the HTTP status would miss.
+        None => return (StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({"error": "evaluation_data_unavailable"}))).into_response(),
     };
 
     match eval.task {
@@ -8435,7 +8818,8 @@ pub async fn get_insights_evaluation(
 
             let n = eval.y_true.len() as f64;
             if n == 0.0 {
-                return axum::Json(serde_json::json!({"error": "evaluation_data_unavailable"})).into_response();
+                return (StatusCode::NOT_FOUND,
+                    axum::Json(serde_json::json!({"error": "evaluation_data_unavailable"}))).into_response();
             }
             let mean_true = eval.y_true.iter().sum::<f64>() / n;
             let ss_res: f64 = eval.y_true.iter().zip(eval.y_pred.iter()).map(|(&a, &p)| (a - p).powi(2)).sum();
@@ -8482,6 +8866,8 @@ pub async fn get_quality_report(
 pub struct UmapStreamParams {
     pub model_id: String,
     pub max_samples: Option<usize>,
+    /// Which dataset to sample from. Defaults to the current dataset when omitted.
+    pub dataset_id: Option<String>,
 }
 
 pub async fn umap_stream_handler(
@@ -8521,9 +8907,9 @@ pub async fn umap_stream_handler(
         let is_clustering = task_type_str.contains("Clustering");
 
         // 3. Get dataset
-        let df = match state.current_data.read().await.clone() {
-            Some(d) => d,
-            None => {
+        let df = match state.resolve_dataset(params.dataset_id.as_deref()).await {
+            Ok(d) => d,
+            Err(_) => {
                 let payload = serde_json::json!({"error": "no dataset loaded"}).to_string();
                 yield Ok::<Event, std::convert::Infallible>(Event::default().data(payload));
                 return;

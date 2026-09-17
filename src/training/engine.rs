@@ -20,6 +20,9 @@ use super::clustering::{KMeans, DBSCAN};
 use super::som::SOM;
 use ndarray::{Array1, Array2, Axis};
 use polars::prelude::*;
+use rand::seq::SliceRandom;
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -312,11 +315,39 @@ impl TrainEngine {
     ) -> Result<(Array2<f64>, Array2<f64>, Array1<f64>, Array1<f64>)> {
         let n = x.nrows();
         let n_cols = x.ncols();
-        let val_size = (n as f64 * self.config.validation_split) as usize;
+        // Defensive clamp: validation_split must stay within (0.0, 0.9] so that
+        // both train and val sets are non-empty. Even if an invalid config value
+        // somehow reaches here, clamp it rather than underflowing `n - val_size`.
+        let safe_split = if self.config.validation_split.is_finite() {
+            self.config.validation_split.clamp(0.01, 0.9)
+        } else {
+            0.2
+        };
+        let mut val_size = (n as f64 * safe_split) as usize;
+        if val_size == 0 {
+            val_size = 1;
+        }
+        if val_size >= n {
+            val_size = n.saturating_sub(1);
+        }
         let train_size = n - val_size;
 
+        // Shuffle row order (seeded, so the split stays reproducible under
+        // `config.random_seed`) before taking a prefix/suffix split. Without this, a plain
+        // prefix/suffix split on data that happens to arrive sorted (e.g. by target value, by
+        // time, or by any upstream ordering) would bias the validation set — it would only
+        // ever see one tail of the value/time range, never a representative sample. The
+        // stratified path (`stratified_split`, used for classification) already shuffles
+        // within each class; this mirrors that for the non-stratified/regression path.
+        let mut perm: Vec<usize> = (0..n).collect();
+        let mut rng = ChaCha8Rng::seed_from_u64(self.config.random_seed.unwrap_or(42));
+        perm.shuffle(&mut rng);
+
+        let x_shuffled = x.select(Axis(0), &perm);
+        let y_shuffled: Array1<f64> = Array1::from_vec(perm.iter().map(|&i| y[i]).collect());
+
         // Copy into contiguous arrays via pre-allocated flat buffers (avoids slice-to-owned overhead)
-        let x_raw = x.as_slice().unwrap_or(&[]);
+        let x_raw = x_shuffled.as_slice().unwrap_or(&[]);
         let is_contiguous = !x_raw.is_empty();
 
         let (x_train, x_val) = if is_contiguous {
@@ -331,18 +362,23 @@ impl TrainEngine {
             )
         } else {
             (
-                x.slice(ndarray::s![..train_size, ..]).to_owned(),
-                x.slice(ndarray::s![train_size.., ..]).to_owned(),
+                x_shuffled.slice(ndarray::s![..train_size, ..]).to_owned(),
+                x_shuffled.slice(ndarray::s![train_size.., ..]).to_owned(),
             )
         };
 
-        let y_train = y.slice(ndarray::s![..train_size]).to_owned();
-        let y_val = y.slice(ndarray::s![train_size..]).to_owned();
+        let y_train = y_shuffled.slice(ndarray::s![..train_size]).to_owned();
+        let y_val = y_shuffled.slice(ndarray::s![train_size..]).to_owned();
 
         Ok((x_train, x_val, y_train, y_val))
     }
 
     fn train_model(&mut self, x: &Array2<f64>, y: &Array1<f64>) -> Result<()> {
+        // Reset epoch history before dispatching: only SGD branches repopulate this,
+        // so any other model type must start from empty rather than inheriting stale
+        // history from a previous train_model() call on the same engine (e.g. train_ensemble).
+        self.epoch_history.clear();
+
         let model = match (&self.config.task_type, &self.config.model_type) {
             // Regression models
             (TaskType::Regression, ModelType::LinearRegression) => {

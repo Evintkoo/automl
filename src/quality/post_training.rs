@@ -70,7 +70,10 @@ pub struct IsotonicCalibrator {
 }
 
 impl IsotonicCalibrator {
-    pub fn fit(scores: &[f64], labels: &[f64]) -> Self {
+    pub fn fit(scores: &[f64], labels: &[f64]) -> Result<Self, String> {
+        if scores.is_empty() || labels.is_empty() {
+            return Err("IsotonicCalibrator::fit requires non-empty scores and labels".to_string());
+        }
         assert_eq!(scores.len(), labels.len());
         let mut pairs: Vec<(f64, f64)> = scores.iter()
             .zip(labels.iter())
@@ -100,11 +103,16 @@ impl IsotonicCalibrator {
 
         let thresholds: Vec<f64> = blocks.iter().map(|(_, s, c)| s / *c as f64).collect();
         let values: Vec<f64> = blocks.iter().map(|(l, _, c)| l / *c as f64).collect();
-        IsotonicCalibrator { thresholds, values }
+        Ok(IsotonicCalibrator { thresholds, values })
     }
 
     /// Step-function interpolation.
     pub fn predict(&self, score: f64) -> f64 {
+        // Defensive fallback: `fit` validates non-empty input, but guard here
+        // too in case `values` is ever empty (e.g. default-constructed).
+        if self.values.is_empty() {
+            return 0.5;
+        }
         match self.thresholds.binary_search_by(|t| t.partial_cmp(&score).unwrap_or(std::cmp::Ordering::Less)) {
             Ok(i) => self.values[i],
             Err(i) => {
@@ -130,7 +138,10 @@ pub struct ConformalPredictor {
 impl ConformalPredictor {
     /// Fit from calibration set predictions and true targets.
     /// `coverage` ∈ (0, 1). Default: 0.90.
-    pub fn fit(predictions: &[f64], targets: &[f64], coverage: f64) -> Self {
+    pub fn fit(predictions: &[f64], targets: &[f64], coverage: f64) -> Result<Self, String> {
+        if predictions.is_empty() || targets.is_empty() {
+            return Err("ConformalPredictor::fit requires non-empty predictions and targets".to_string());
+        }
         assert_eq!(predictions.len(), targets.len());
         let mut residuals: Vec<f64> = predictions.iter().zip(targets.iter())
             .map(|(p, t)| (p - t).abs())
@@ -138,7 +149,7 @@ impl ConformalPredictor {
         residuals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let n = residuals.len();
         let idx = (((coverage * (n + 1) as f64).ceil() as usize)).min(n).max(1) - 1;
-        ConformalPredictor { quantile: residuals[idx] }
+        Ok(ConformalPredictor { quantile: residuals[idx] })
     }
 
     pub fn predict_interval(&self, prediction: f64) -> (f64, f64) {
@@ -179,6 +190,17 @@ impl OodDetector {
     pub fn fit(features: &Array2<f64>, percentile: f64) -> Self {
         let n = features.nrows();
         let d = features.ncols();
+
+        if n == 0 {
+            // No calibration data to derive a threshold from. Fall back to a
+            // detector that never flags anything as OOD rather than
+            // panicking on an empty `distances` index below.
+            return OodDetector {
+                means: vec![0.0; d],
+                stds: vec![1.0; d],
+                threshold: f64::INFINITY,
+            };
+        }
 
         let means: Vec<f64> = (0..d).map(|j| {
             features.column(j).iter().sum::<f64>() / n as f64
@@ -251,7 +273,10 @@ impl PostTrainingGate {
         let platt_probs: Vec<f64> = raw_scores.iter().map(|&s| platt.predict(s)).collect();
         let ece_platt = expected_calibration_error(&platt_probs, &bool_labels, self.n_ece_bins);
 
-        let isotonic = IsotonicCalibrator::fit(raw_scores, labels);
+        let isotonic = match IsotonicCalibrator::fit(raw_scores, labels) {
+            Ok(cal) => cal,
+            Err(_) => return None,
+        };
         let iso_probs: Vec<f64> = raw_scores.iter().map(|&s| isotonic.predict(s)).collect();
         let ece_iso = expected_calibration_error(&iso_probs, &bool_labels, self.n_ece_bins);
 
@@ -289,7 +314,7 @@ mod tests {
     fn test_isotonic_calibrator_is_monotone() {
         let scores = vec![0.1, 0.3, 0.5, 0.7, 0.9];
         let labels = vec![0.0, 0.0, 1.0, 1.0, 1.0];
-        let cal = IsotonicCalibrator::fit(&scores, &labels);
+        let cal = IsotonicCalibrator::fit(&scores, &labels).unwrap();
         let p1 = cal.predict(0.2);
         let p2 = cal.predict(0.6);
         let p3 = cal.predict(0.8);
@@ -319,7 +344,7 @@ mod tests {
     fn test_conformal_predictor_coverage() {
         let preds: Vec<f64> = (0..100).map(|i| i as f64).collect();
         let targets: Vec<f64> = (0..100).map(|i| i as f64 + 0.5).collect(); // residuals = 0.5
-        let cp = ConformalPredictor::fit(&preds, &targets, 0.90);
+        let cp = ConformalPredictor::fit(&preds, &targets, 0.90).unwrap();
         // All residuals are 0.5, so quantile should be 0.5
         assert!((cp.quantile - 0.5).abs() < 0.1, "quantile should ≈ 0.5, got {}", cp.quantile);
         let (lo, hi) = cp.predict_interval(10.0);

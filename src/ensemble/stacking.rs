@@ -45,6 +45,11 @@ where
     meta_learner_factory: Option<F>,
     /// Fitted meta-learner
     fitted_meta_learner: Option<Box<dyn Model>>,
+    /// Class labels observed during `fit`, ascending. Only populated (and only relevant) when
+    /// `config.use_probabilities` is true — it anchors the per-class probability column
+    /// layout of the meta-feature matrix so `predict` can reproduce the same layout `fit`
+    /// used, without needing `y` again.
+    fitted_classes: Option<Vec<i64>>,
 }
 
 impl<F> StackingClassifier<F>
@@ -59,6 +64,7 @@ where
             fitted_base_models: None,
             meta_learner_factory: None,
             fitted_meta_learner: None,
+            fitted_classes: None,
         }
     }
 
@@ -101,11 +107,27 @@ where
 
         let splits = cv.split(n_samples, None, None)?;
 
+        // `use_probabilities` used to be a dead config flag — meta-features always used hard
+        // labels regardless of its value. When it's set, each base model instead contributes
+        // one meta-feature column per class (its predicted per-class probabilities, via
+        // `Model::predict_proba`, falling back to a one-hot encoding of its hard label for
+        // models that don't implement it), rather than a single hard-label column.
+        let classes: Vec<i64> = if self.config.use_probabilities {
+            let mut c: Vec<i64> = y.iter().map(|&v| v.round() as i64).collect();
+            c.sort_unstable();
+            c.dedup();
+            c
+        } else {
+            Vec::new()
+        };
+        let n_classes = classes.len().max(1);
+        let cols_per_model = if self.config.use_probabilities { n_classes } else { 1 };
+
         // Initialize meta-features matrix
         let meta_features_cols = if self.config.passthrough {
-            n_base_models + x.ncols()
+            n_base_models * cols_per_model + x.ncols()
         } else {
-            n_base_models
+            n_base_models * cols_per_model
         };
         let mut meta_features = Array2::zeros((n_samples, meta_features_cols));
         let mut fitted_models: Vec<Vec<Box<dyn Model>>> = (0..n_base_models).map(|_| Vec::new()).collect();
@@ -116,7 +138,7 @@ where
                 // Train on training fold
                 let x_train = split.train_indices.iter().map(|&i| x.row(i).to_owned()).collect::<Vec<_>>();
                 let y_train: Vec<f64> = split.train_indices.iter().map(|&i| y[i]).collect();
-                
+
                 let x_train = Array2::from_shape_vec(
                     (x_train.len(), x.ncols()),
                     x_train.into_iter().flat_map(|r| r.to_vec()).collect(),
@@ -132,11 +154,26 @@ where
                     x_val.into_iter().flat_map(|r| r.to_vec()).collect(),
                 )?;
 
-                let predictions = model.predict(&x_val)?;
+                if self.config.use_probabilities {
+                    let hard_pred = model.predict(&x_val)?;
+                    let proba = model.predict_proba(&x_val)?;
+                    let proba = match proba {
+                        Some(p) if p.nrows() == x_val.nrows() && p.ncols() == n_classes => p,
+                        _ => Self::one_hot(&hard_pred, &classes, x_val.nrows(), n_classes),
+                    };
 
-                // Store predictions as meta-features
-                for (local_idx, &global_idx) in split.test_indices.iter().enumerate() {
-                    meta_features[[global_idx, base_idx]] = predictions[local_idx];
+                    for (local_idx, &global_idx) in split.test_indices.iter().enumerate() {
+                        for c in 0..n_classes {
+                            meta_features[[global_idx, base_idx * cols_per_model + c]] =
+                                proba[[local_idx, c]];
+                        }
+                    }
+                } else {
+                    let predictions = model.predict(&x_val)?;
+                    // Store predictions as meta-features
+                    for (local_idx, &global_idx) in split.test_indices.iter().enumerate() {
+                        meta_features[[global_idx, base_idx]] = predictions[local_idx];
+                    }
                 }
 
                 fitted_models[base_idx].push(model);
@@ -145,9 +182,10 @@ where
 
         // Add passthrough features if configured
         if self.config.passthrough {
+            let offset = n_base_models * cols_per_model;
             for i in 0..n_samples {
                 for j in 0..x.ncols() {
-                    meta_features[[i, n_base_models + j]] = x[[i, j]];
+                    meta_features[[i, offset + j]] = x[[i, j]];
                 }
             }
         }
@@ -158,8 +196,32 @@ where
 
         self.fitted_base_models = Some(fitted_models);
         self.fitted_meta_learner = Some(meta_learner);
+        self.fitted_classes = if self.config.use_probabilities {
+            Some(classes)
+        } else {
+            None
+        };
 
         Ok(())
+    }
+
+    /// One-hot encode a model's hard label predictions against the fitted `classes` list.
+    /// Used as the probability fallback for base models that don't implement
+    /// `Model::predict_proba` when `use_probabilities` is enabled.
+    fn one_hot(
+        hard_pred: &Array1<f64>,
+        classes: &[i64],
+        n_samples: usize,
+        n_classes: usize,
+    ) -> Array2<f64> {
+        let mut onehot = Array2::zeros((n_samples, n_classes));
+        for (i, &label) in hard_pred.iter().enumerate() {
+            let li = label.round() as i64;
+            if let Some(col) = classes.iter().position(|&c| c == li) {
+                onehot[[i, col]] = 1.0;
+            }
+        }
+        onehot
     }
 
     /// Make predictions
@@ -175,35 +237,64 @@ where
         let n_samples = x.nrows();
         let n_base_models = fitted_models.len();
 
-        // Get predictions from each base model (average across folds)
+        let classes = self.fitted_classes.as_deref().unwrap_or(&[]);
+        let n_classes = classes.len().max(1);
+        let cols_per_model = if self.config.use_probabilities { n_classes } else { 1 };
+
+        // Get predictions from each base model (average across folds), using the same
+        // meta-feature column layout `fit` used (hard label vs. per-class probabilities).
         let meta_features_cols = if self.config.passthrough {
-            n_base_models + x.ncols()
+            n_base_models * cols_per_model + x.ncols()
         } else {
-            n_base_models
+            n_base_models * cols_per_model
         };
         let mut meta_features = Array2::zeros((n_samples, meta_features_cols));
 
         for (base_idx, fold_models) in fitted_models.iter().enumerate() {
-            // Average predictions across fold models
-            let mut sum_preds = Array1::zeros(n_samples);
-            
-            for model in fold_models {
-                let preds = model.predict(x)?;
-                sum_preds = sum_preds + preds;
-            }
+            if self.config.use_probabilities {
+                // Average per-class probabilities across fold models
+                let mut sum_proba = Array2::zeros((n_samples, n_classes));
 
-            let avg_preds = sum_preds / fold_models.len() as f64;
+                for model in fold_models {
+                    let hard_pred = model.predict(x)?;
+                    let proba = model.predict_proba(x)?;
+                    let proba = match proba {
+                        Some(p) if p.nrows() == n_samples && p.ncols() == n_classes => p,
+                        _ => Self::one_hot(&hard_pred, classes, n_samples, n_classes),
+                    };
+                    sum_proba = sum_proba + proba;
+                }
 
-            for i in 0..n_samples {
-                meta_features[[i, base_idx]] = avg_preds[i];
+                let avg_proba = sum_proba / fold_models.len() as f64;
+
+                for i in 0..n_samples {
+                    for c in 0..n_classes {
+                        meta_features[[i, base_idx * cols_per_model + c]] = avg_proba[[i, c]];
+                    }
+                }
+            } else {
+                // Average hard-label predictions across fold models
+                let mut sum_preds = Array1::zeros(n_samples);
+
+                for model in fold_models {
+                    let preds = model.predict(x)?;
+                    sum_preds = sum_preds + preds;
+                }
+
+                let avg_preds = sum_preds / fold_models.len() as f64;
+
+                for i in 0..n_samples {
+                    meta_features[[i, base_idx]] = avg_preds[i];
+                }
             }
         }
 
         // Add passthrough features
         if self.config.passthrough {
+            let offset = n_base_models * cols_per_model;
             for i in 0..n_samples {
                 for j in 0..x.ncols() {
-                    meta_features[[i, n_base_models + j]] = x[[i, j]];
+                    meta_features[[i, offset + j]] = x[[i, j]];
                 }
             }
         }

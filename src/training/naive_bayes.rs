@@ -286,7 +286,21 @@ impl MultinomialNaiveBayes {
                 log_probs[[i, j]] = log_prior + log_likelihood;
             }
         }
-        
+
+        // Normalize (log-sum-exp trick), mirroring GaussianNaiveBayes::predict_log_proba.
+        // Without this, `log_probs` is just the raw (unnormalized) joint log-likelihoods —
+        // fine for `predict()`'s argmax (normalization doesn't change which class is largest),
+        // but wrong for anything that exponentiates these into actual probabilities (e.g.
+        // engine.rs's `predict_proba_internal`, which does exactly that): exponentiated rows
+        // would not sum to 1.
+        for mut row in log_probs.rows_mut() {
+            let max_val = row.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let log_sum: f64 = row.iter().map(|&v| (v - max_val).exp()).sum::<f64>().ln();
+            for val in row.iter_mut() {
+                *val = *val - max_val - log_sum;
+            }
+        }
+
         log_probs
     }
 }

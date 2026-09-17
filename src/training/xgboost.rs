@@ -265,8 +265,14 @@ impl XGBoostRegressor {
 
             let tree = build_xgb_tree(x, &grad, &hess, &row_indices, &col_indices, 0, &self.config);
 
-            // Update predictions
-            for &i in &row_indices {
+            // Update predictions for ALL rows, not just the ones in `row_indices` — subsample
+            // only controls which rows are used to FIT this round's tree; every row's cached
+            // prediction must still receive this round's contribution, otherwise the rows
+            // left out of the sample keep a stale prediction that a fresh `predict()` call
+            // would not reproduce (tree nodes reference the original/full feature space, so
+            // this is safe to evaluate on every row regardless of `colsample_bytree`).
+            // Matches lightgbm.rs/catboost.rs.
+            for i in 0..n_samples {
                 let row = x.row(i);
                 preds[i] += self.config.learning_rate * tree.predict(row.as_slice().unwrap());
             }
@@ -382,7 +388,10 @@ impl XGBoostClassifier {
 
             let tree = build_xgb_tree(x, &grad, &hess, &row_indices, &col_indices, 0, &self.config);
 
-            for &i in &row_indices {
+            // Update log-odds for ALL rows, not just the sampled ones — see the matching
+            // comment in XGBoostRegressor::fit for why (keeps the running cache consistent
+            // with a fresh `predict_proba()` regardless of `subsample`).
+            for i in 0..n_samples {
                 let row = x.row(i);
                 raw_preds[i] += self.config.learning_rate * tree.predict(row.as_slice().unwrap());
             }

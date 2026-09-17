@@ -888,7 +888,7 @@ async fn test_insights_evaluation_no_cache() {
             .uri("/api/insights/evaluation?model_id=nonexistent")
             .body(axum::body::Body::empty()).unwrap()
     ).await.unwrap();
-    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.status(), 404);
     let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["error"], "evaluation_data_unavailable");

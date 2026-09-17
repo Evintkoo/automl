@@ -324,7 +324,7 @@ impl SimdOps {
     pub fn argmax_f64(data: &[f64]) -> Option<usize> {
         data.iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(idx, _)| idx)
     }
 
@@ -332,7 +332,7 @@ impl SimdOps {
     pub fn argmin_f64(data: &[f64]) -> Option<usize> {
         data.iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(idx, _)| idx)
     }
 

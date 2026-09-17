@@ -50,7 +50,13 @@ impl std::fmt::Display for IsoStandard {
     }
 }
 
-/// Status of a compliance control
+/// Status of a compliance control.
+///
+/// IMPORTANT: this status is a **self-reported, caller-supplied capability
+/// claim** (see the `capabilities` argument to
+/// [`ComplianceChecker::generate_report`]) — it is not independently
+/// verified against the running system's actual state. Treat it as a
+/// compliance checklist entry, not an audited attestation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ControlStatus {
     /// Fully implemented and verified
@@ -95,7 +101,14 @@ pub struct ComplianceControl {
     pub recommendation: Option<String>,
 }
 
-/// Complete compliance report
+/// Complete compliance report.
+///
+/// **All control statuses in this report are self-reported, unverified
+/// capability claims** supplied by the caller of
+/// [`ComplianceChecker::generate_report`] — this module does not itself
+/// probe or verify live system state. See `attestation_basis` below, which
+/// is always populated to make this explicit to downstream consumers
+/// (including serialized/JSON consumers) of the report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComplianceReport {
     /// Report generation timestamp
@@ -104,13 +117,26 @@ pub struct ComplianceReport {
     pub automl_version: String,
     /// Per-standard summaries
     pub standard_summaries: Vec<StandardSummary>,
-    /// All individual controls
+    /// All individual controls. Each control's `status` is a self-reported
+    /// capability claim, not an independently verified fact — see
+    /// `attestation_basis`.
     pub controls: Vec<ComplianceControl>,
-    /// Overall compliance score (0.0 - 1.0)
+    /// Overall compliance score (0.0 - 1.0), computed purely from the
+    /// self-reported statuses above.
     pub overall_score: f64,
     /// Critical gaps that need immediate attention
     pub critical_gaps: Vec<String>,
+    /// Explains the evidentiary basis of every status in this report: they
+    /// are self-reported capability claims from the caller-supplied
+    /// `capabilities` map, not independently verified/audited facts.
+    pub attestation_basis: String,
 }
+
+/// Human-readable constant describing how statuses in a [`ComplianceReport`]
+/// were derived. Always attached to generated reports via
+/// `ComplianceReport::attestation_basis` so downstream consumers cannot
+/// mistake self-reported claims for an audited attestation.
+const SELF_REPORTED_ATTESTATION_BASIS: &str = "self-reported: every control status is derived solely from the caller-supplied `capabilities` map and has not been independently verified against live system state";
 
 /// Summary for a single standard
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,11 +188,23 @@ impl ComplianceChecker {
         Self { config }
     }
 
-    /// Generate a compliance report based on the current system state.
+    /// Generate a compliance report from **caller-supplied, self-reported**
+    /// capability claims.
     ///
-    /// The `capabilities` map describes what's currently active:
+    /// The `capabilities` map describes what the caller asserts is
+    /// currently active:
     /// - Keys: capability names (e.g., "auth_enabled", "fairness_module", "audit_logging")
     /// - Values: whether the capability is active
+    ///
+    /// This method does **not** independently verify any of these claims
+    /// against real system state — every resulting `ControlStatus` is only
+    /// as trustworthy as the `capabilities` map the caller provided. A key
+    /// missing from the map is treated conservatively as `false` (i.e. the
+    /// control is scored as not compliant), so an incomplete map cannot by
+    /// itself make a control look more compliant than the caller actually
+    /// claimed. Callers that want a hard failure on an incomplete/malformed
+    /// map (rather than the conservative "not compliant" default) should
+    /// call [`Self::validate_capabilities`] first.
     pub fn generate_report(
         &self,
         capabilities: &HashMap<String, bool>,
@@ -242,6 +280,58 @@ impl ComplianceChecker {
             controls,
             overall_score,
             critical_gaps,
+            attestation_basis: SELF_REPORTED_ATTESTATION_BASIS.to_string(),
+        }
+    }
+
+    /// The capability keys this checker's configured standards will consult
+    /// (mirrors the keys read via `has(...)` in `get_controls_for_standard`
+    /// for each configured [`IsoStandard`]).
+    fn required_capability_keys_for_standard(standard: &IsoStandard) -> &'static [&'static str] {
+        match standard {
+            IsoStandard::Iso27001 => &[
+                "auth_enabled", "rbac_enabled", "tamper_evident_audit", "audit_logging",
+                "encryption_at_rest", "data_classification", "rate_limiting", "input_validation",
+            ],
+            IsoStandard::IsoTr24027 => &["fairness_metrics", "bias_detection", "fairness_monitoring"],
+            IsoStandard::IsoTr24028 => &["explainability", "calibration", "model_cards", "audit_logging"],
+            IsoStandard::Iso5338 => &["provenance", "model_versioning", "reproducibility", "drift_detection"],
+            IsoStandard::Iso5259 => &["data_quality", "preprocessing", "datasheets"],
+            IsoStandard::Iso42001 => &["risk_register", "compliance_reporting"],
+            IsoStandard::Iso25010 => &["slo_monitoring", "monitoring", "test_suite"],
+            IsoStandard::Iso27701 => &["pii_detection", "anonymization", "retention_policies"],
+            IsoStandard::Iso23053 => &[],
+        }
+    }
+
+    /// Validate that `capabilities` contains every key this checker's
+    /// configured standards will consult before calling
+    /// [`Self::generate_report`].
+    ///
+    /// [`Self::generate_report`] itself keeps its existing
+    /// signature/behavior (missing keys default to `false`, i.e. the
+    /// conservative "not compliant" status) so it remains a drop-in
+    /// replacement for existing callers. This method lets callers that want
+    /// a hard failure on an incomplete or malformed `capabilities` map
+    /// (rather than silently scoring missing keys as "not compliant") check
+    /// that up front. Returns the sorted list of missing keys, if any.
+    pub fn validate_capabilities(
+        &self,
+        capabilities: &HashMap<String, bool>,
+    ) -> std::result::Result<(), Vec<String>> {
+        let mut missing: Vec<String> = Vec::new();
+        for standard in &self.config.standards {
+            for key in Self::required_capability_keys_for_standard(standard) {
+                if !capabilities.contains_key(*key) && !missing.iter().any(|m| m == key) {
+                    missing.push((*key).to_string());
+                }
+            }
+        }
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            missing.sort();
+            Err(missing)
         }
     }
 
@@ -999,6 +1089,40 @@ mod tests {
         assert!(config.standards.contains(&IsoStandard::Iso27001));
         assert!(config.standards.contains(&IsoStandard::Iso25010));
         assert!(config.include_evidence);
+    }
+
+    #[test]
+    fn test_report_carries_self_reported_attestation() {
+        let checker = ComplianceChecker::default();
+        let report = checker.generate_report(&HashMap::new());
+        assert!(report.attestation_basis.contains("self-reported"));
+    }
+
+    #[test]
+    fn test_validate_capabilities_reports_missing_keys() {
+        let checker = ComplianceChecker::new(ComplianceCheckConfig {
+            standards: vec![IsoStandard::Iso27701],
+            include_evidence: true,
+        });
+        // Iso27701 requires pii_detection, anonymization, retention_policies
+        let mut caps = HashMap::new();
+        caps.insert("pii_detection".to_string(), true);
+        let result = checker.validate_capabilities(&caps);
+        let missing = result.expect_err("expected missing keys");
+        assert_eq!(missing, vec!["anonymization".to_string(), "retention_policies".to_string()]);
+    }
+
+    #[test]
+    fn test_validate_capabilities_passes_with_complete_map() {
+        let checker = ComplianceChecker::new(ComplianceCheckConfig {
+            standards: vec![IsoStandard::Iso27701],
+            include_evidence: true,
+        });
+        let mut caps = HashMap::new();
+        caps.insert("pii_detection".to_string(), false);
+        caps.insert("anonymization".to_string(), false);
+        caps.insert("retention_policies".to_string(), false);
+        assert!(checker.validate_capabilities(&caps).is_ok());
     }
 
     #[test]

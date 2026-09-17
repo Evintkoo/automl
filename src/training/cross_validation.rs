@@ -151,9 +151,19 @@ impl CrossValidator {
         n_splits: usize,
         shuffle: bool,
     ) -> Result<Vec<CVSplit>> {
-        // Group samples by class
-        let mut class_indices: std::collections::HashMap<i64, Vec<usize>> = std::collections::HashMap::new();
-        
+        if n_splits < 2 {
+            return Err(AutoMLError::ValidationError(
+                "n_splits must be at least 2".to_string()
+            ));
+        }
+
+        // Group samples by class. Use a BTreeMap (not a HashMap) so class iteration order is
+        // deterministic (ascending class label) — a HashMap's iteration order depends on its
+        // randomized per-process hasher seed, which previously made `indices.shuffle(&mut
+        // rng)` below consume the shared `rng`'s draws in a different order per class from
+        // run to run, so results were non-reproducible even with a fixed `random_state`.
+        let mut class_indices: std::collections::BTreeMap<i64, Vec<usize>> = std::collections::BTreeMap::new();
+
         for (idx, &val) in y.iter().enumerate() {
             let class = val.round() as i64;
             class_indices.entry(class).or_default().push(idx);
@@ -215,6 +225,12 @@ impl CrossValidator {
         }
 
         let test_size = n_samples / (n_splits + 1);
+        if test_size == 0 {
+            return Err(AutoMLError::ValidationError(format!(
+                "not enough samples ({}) for requested n_splits ({}): each fold would be empty",
+                n_samples, n_splits
+            )));
+        }
         let mut splits = Vec::with_capacity(n_splits);
 
         for fold_idx in 0..n_splits {
@@ -260,6 +276,12 @@ impl CrossValidator {
         groups: &Array1<i64>,
         n_splits: usize,
     ) -> Result<Vec<CVSplit>> {
+        if n_splits < 2 {
+            return Err(AutoMLError::ValidationError(
+                "n_splits must be at least 2".to_string()
+            ));
+        }
+
         // Get unique groups
         let mut unique_groups: Vec<i64> = groups.iter().copied().collect();
         unique_groups.sort_unstable();
@@ -343,18 +365,23 @@ pub struct CVResults {
 
 impl CVResults {
     /// Create CV results from fold scores
-    pub fn from_scores(scores: Vec<f64>) -> Self {
+    pub fn from_scores(scores: Vec<f64>) -> Result<Self> {
+        if scores.is_empty() {
+            return Err(AutoMLError::ValidationError(
+                "cannot compute CV results from an empty list of fold scores".to_string()
+            ));
+        }
         let n_folds = scores.len();
         let mean_score = scores.iter().sum::<f64>() / n_folds as f64;
         let variance = scores.iter().map(|s| (s - mean_score).powi(2)).sum::<f64>() / n_folds as f64;
         let std_score = variance.sqrt();
 
-        Self {
+        Ok(Self {
             scores,
             mean_score,
             std_score,
             n_folds,
-        }
+        })
     }
 }
 
@@ -413,7 +440,7 @@ pub fn cross_val_score(
         .collect();
 
     let scores: Vec<f64> = fold_scores.into_iter().collect::<Result<Vec<f64>>>()?;
-    Ok(CVResults::from_scores(scores))
+    CVResults::from_scores(scores)
 }
 
 #[cfg(test)]

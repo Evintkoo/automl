@@ -55,21 +55,12 @@ pub async fn security_layer(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Extract client identifier for rate limiting
-    let client_id = request
-        .headers()
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or(&ip)
-        .to_string();
-
-    // Check rate limit
-    if !middleware.rate_limiter.is_allowed(&client_id) {
-        return Err(StatusCode::TOO_MANY_REQUESTS);
-    }
-
-    // Verify API key - require it when API key auth is enabled
-    match request.headers().get("x-api-key").and_then(|v| v.to_str().ok()) {
+    // Verify API key first - require it when API key auth is enabled. Rate limiting
+    // must key off a *verified* identity (or the connection IP), never an unverified
+    // client-supplied header, otherwise an attacker can mint a fresh quota per request
+    // by sending a different bogus API key each time.
+    let raw_api_key = request.headers().get("x-api-key").and_then(|v| v.to_str().ok());
+    match raw_api_key {
         Some(api_key) => {
             if !middleware.security_manager.verify_api_key(api_key) {
                 return Err(StatusCode::UNAUTHORIZED);
@@ -83,17 +74,39 @@ pub async fn security_layer(
         }
     }
 
+    // Extract client identifier for rate limiting: now that the API key (if any) has
+    // been verified, it is safe to use as the bucket key; otherwise fall back to IP.
+    // When API-key auth is disabled, `verify_api_key` accepts any (even bogus/rotating)
+    // key, so the header carries no verified identity in that mode — always bucket on
+    // IP instead, otherwise a caller could mint a fresh rate-limit quota per request by
+    // sending a different unverified key each time.
+    let client_id = if middleware.security_manager.api_key_auth_enabled() {
+        raw_api_key.unwrap_or(&ip).to_string()
+    } else {
+        ip.clone()
+    };
+
+    // Check rate limit
+    if !middleware.rate_limiter.is_allowed(&client_id) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+
     let method = request.method().to_string();
     let uri = request.uri().path().to_string();
 
-    // RBAC check: extract role from x-role header (defaults to Admin for local-first use).
-    // In production, the role should come from the authenticated session/JWT.
-    let role = request
-        .headers()
-        .get("x-role")
-        .and_then(|v| v.to_str().ok())
-        .and_then(Role::from_str)
-        .unwrap_or(Role::Admin);
+    // RBAC check: role must never come from a client-supplied header (that was the
+    // vulnerability - anyone could self-declare `x-role: admin`). This codebase has
+    // no per-API-key role table yet, so the only identity signal available here is
+    // "did the caller present a valid, server-configured secret (or is there no auth
+    // boundary configured at all)". Either way, by this point the caller has already
+    // passed `verify_api_key` above, so they hold whatever privilege this deployment
+    // grants an authenticated caller - reaching this line means either API-key auth
+    // is disabled entirely (single-tenant/local usage, everyone is the operator) or
+    // the caller presented a valid pre-configured secret key. Grant full access in
+    // both cases; what's eliminated is the attacker's ability to choose their own
+    // role via a header. If/when API keys carry per-key roles (e.g. a role column in
+    // key config, or JWT claims), replace this with a real lookup instead of Admin.
+    let role = Role::Admin;
 
     if !middleware.rbac_manager.check_api_access(&role, &uri, &method) {
         return Err(StatusCode::FORBIDDEN);

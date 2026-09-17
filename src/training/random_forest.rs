@@ -222,6 +222,10 @@ impl RandomForest {
                     .with_criterion(self.criterion);
 
                 tree.max_features = Some(max_features);
+                // Give each tree its own seed so per-split random feature subsampling
+                // (see DecisionTree::find_best_split) is deterministic given `random_state`
+                // but independent/decorrelated across trees in the forest.
+                tree.seed = seed;
                 if tree.fit(&x_boot, &y_boot).is_err() {
                     return None;
                 }

@@ -13,7 +13,7 @@ use crate::security::{SecurityManager, SecurityConfig, RateLimiter, RateLimitCon
 use crate::preprocessing::DataPreprocessor;
 use crate::training::TrainEngine;
 use crate::provenance::ProvenanceTracker;
-use crate::privacy::RetentionManager;
+use crate::privacy::{RetentionManager, DataClassification};
 
 use super::ServerConfig;
 
@@ -40,6 +40,10 @@ pub struct TrainingJob {
     pub config: serde_json::Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub model_path: Option<PathBuf>,
+    /// Identity fingerprint of the request that created this job (dataset + request
+    /// body), used to detect duplicate/retried submissions before spawning a second
+    /// expensive run. `None` for job kinds that don't participate in dedup.
+    pub fingerprint: Option<String>,
 }
 
 /// Trained model information
@@ -73,6 +77,9 @@ pub struct DatasetInfo {
     pub columns: usize,
     pub column_names: Vec<String>,
     pub dtypes: Vec<String>,
+    /// When this dataset was stored — used for oldest-first eviction and to give
+    /// `RetentionManager` a stable notion of dataset age.
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// In-memory model registry for caching loaded inference engines
@@ -180,8 +187,19 @@ pub struct AppState {
     pub config: ServerConfig,
     pub datasets: RwLock<HashMap<String, DatasetInfo>>,
     pub jobs: RwLock<HashMap<String, TrainingJob>>,
+    /// `tokio::spawn` handles for in-flight training-style jobs, keyed by job id.
+    /// Stored (rather than discarded) so a future cancel-job endpoint can abort a
+    /// running job; nothing currently calls `.abort()` on these.
+    pub job_handles: DashMap<String, tokio::task::JoinHandle<()>>,
     pub models: DashMap<String, ModelInfo>,
-    pub current_data: RwLock<Option<DataFrame>>,
+    /// Actual per-dataset DataFrame storage, keyed by dataset id. Kept separate from
+    /// `datasets` (metadata only) so that multiple datasets uploaded/imported
+    /// concurrently can coexist instead of one silently clobbering another via a
+    /// single shared "current" buffer.
+    pub dataset_frames: RwLock<HashMap<String, DataFrame>>,
+    /// The dataset id operations default to when a request doesn't specify its own
+    /// `dataset_id` — single source of truth for "the currently active dataset".
+    pub current_dataset_id: RwLock<Option<String>>,
     pub preprocessor: RwLock<Option<DataPreprocessor>>,
     pub model_registry: ModelRegistry,
     /// Shared prediction cache for all inference engines
@@ -250,8 +268,10 @@ impl AppState {
             config,
             datasets: RwLock::new(HashMap::new()),
             jobs: RwLock::new(HashMap::new()),
+            job_handles: DashMap::new(),
             models: DashMap::new(),
-            current_data: RwLock::new(None),
+            dataset_frames: RwLock::new(HashMap::new()),
+            current_dataset_id: RwLock::new(None),
             preprocessor: RwLock::new(None),
             model_registry: ModelRegistry::new(10)
                 .with_prediction_cache(Arc::clone(&prediction_cache)),
@@ -277,19 +297,38 @@ impl AppState {
     const MAX_TRAIN_ENGINES: usize = 50;
     /// Maximum number of completed studies to retain
     const MAX_COMPLETED_STUDIES: usize = 100;
+    /// Maximum number of full datasets (metadata + in-memory DataFrame) to retain at
+    /// once. Storing every uploaded dataset's actual data (rather than just the
+    /// single shared `current_data` buffer the old design used) trades correctness
+    /// for memory, so this caps unbounded growth; the oldest datasets (by
+    /// `created_at`, excluding whatever is currently active) are evicted first.
+    const MAX_STORED_DATASETS: usize = 50;
 
     pub fn generate_id() -> String {
         // Use full UUID to avoid collisions (previously only 8 hex chars = 32 bits)
         Uuid::new_v4().to_string()
     }
 
-    /// Store a dataset and return its ID
+    /// Store a dataset and return its ID.
+    ///
+    /// Inserts metadata (`datasets`) and the actual DataFrame (`dataset_frames`)
+    /// before flipping `current_dataset_id` to point at the new id. Doing the writes
+    /// in that order — and letting each write-guard's `Drop` run (releasing the lock)
+    /// strictly before the next lock is acquired — establishes a happens-before chain
+    /// through the locks' own acquire/release semantics: any reader that observes the
+    /// new `current_dataset_id` value is guaranteed to also observe the corresponding
+    /// `datasets`/`dataset_frames` entries, because the reader must acquire (and thus
+    /// synchronize with the release of) the `current_dataset_id` lock before it can
+    /// acquire the `dataset_frames`/`datasets` locks to look the id up. This avoids
+    /// needing a single mega-mutex across three independent maps while still ruling
+    /// out the "current_dataset_id points at an id resolve_dataset can't find yet"
+    /// race.
     pub async fn store_dataset(&self, name: String, df: DataFrame, path: PathBuf) -> String {
         let id = Self::generate_id();
-        
+
         let column_names: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
         let dtypes: Vec<String> = df.dtypes().iter().map(|d| format!("{:?}", d)).collect();
-        
+
         let info = DatasetInfo {
             id: id.clone(),
             name,
@@ -298,15 +337,76 @@ impl AppState {
             columns: df.width(),
             column_names,
             dtypes,
+            created_at: chrono::Utc::now(),
         };
 
-        // Store info
+        // Register with the retention manager so `/api/compliance/retention-status`
+        // (`retention_manager.get_expired()`) has something to actually enforce.
+        // Previously nothing in the crate ever called `register`, so retention was
+        // permanently a no-op regardless of configuration. Uploaded user data is
+        // treated as Internal by default — it isn't public, but we don't have enough
+        // signal at upload time to justify the stricter Confidential/Restricted
+        // 90/30-day windows; PII scanning (see `src/privacy/mod.rs::PiiScanner`) is a
+        // separate, explicit opt-in step that can reclassify a dataset later if needed.
+        self.retention_manager.register(&id, DataClassification::Internal);
+
+        // Store metadata and data together, then flip the "current" pointer last (see
+        // doc comment above for why this ordering is sufficient for atomicity from a
+        // reader's perspective).
         self.datasets.write().await.insert(id.clone(), info);
-        
-        // Set as current data
-        *self.current_data.write().await = Some(df);
+        self.dataset_frames.write().await.insert(id.clone(), df);
+        *self.current_dataset_id.write().await = Some(id.clone());
 
         id
+    }
+
+    /// Resolve a DataFrame by an optional client-supplied `dataset_id`.
+    ///
+    /// - `Some(id)`: look up that exact dataset; 404 if it isn't found (unknown or
+    ///   evicted id).
+    /// - `None`: fall back to whatever `store_dataset` most recently marked as
+    ///   "current". This is the default path used by every existing caller that
+    ///   doesn't yet pass its own `dataset_id`, so its error (a "No data loaded" 404)
+    ///   is preserved byte-for-byte from the old `current_data.read().await.as_ref()
+    ///   == None` behavior to avoid changing existing tests/clients.
+    pub async fn resolve_dataset(&self, dataset_id: Option<&str>) -> super::error::Result<DataFrame> {
+        self.resolve_dataset_with_id(dataset_id).await.map(|(_, df)| df)
+    }
+
+    /// Like `resolve_dataset`, but also returns the id that was actually resolved.
+    /// Needed by callers that mutate the DataFrame in place (preprocessing, auto-clean)
+    /// and must write the result back to the *same* dataset id they read from — which
+    /// may have been implicitly resolved from `current_dataset_id` rather than passed
+    /// explicitly.
+    pub async fn resolve_dataset_with_id(&self, dataset_id: Option<&str>) -> super::error::Result<(String, DataFrame)> {
+        use super::error::ServerError;
+        let id = match dataset_id {
+            Some(id) => id.to_string(),
+            None => self.current_dataset_id.read().await.clone()
+                .ok_or_else(|| ServerError::NotFound("No data loaded".to_string()))?,
+        };
+        let df = self.dataset_frames.read().await.get(&id).cloned()
+            .ok_or_else(|| ServerError::NotFound(format!("Dataset not found: {}", id)))?;
+        Ok((id, df))
+    }
+
+    /// Replace the stored DataFrame for `dataset_id` (used after an in-place
+    /// transform like preprocessing/auto-clean) and refresh its cached metadata
+    /// (row/column counts, column names, dtypes) to match.
+    pub async fn update_dataset_frame(&self, dataset_id: &str, df: DataFrame) {
+        let rows = df.height();
+        let columns = df.width();
+        let column_names: Vec<String> = df.get_column_names().iter().map(|s| s.to_string()).collect();
+        let dtypes: Vec<String> = df.dtypes().iter().map(|d| format!("{:?}", d)).collect();
+
+        self.dataset_frames.write().await.insert(dataset_id.to_string(), df);
+
+        if let Some(info) = self.datasets.write().await.get_mut(dataset_id) {
+            info.rows = rows;
+            info.columns = columns;
+            info.column_names = column_names;
+            info.dtypes = dtypes;
+        }
     }
 
     /// Evict completed/failed jobs and old train engines to prevent unbounded memory growth.
@@ -330,6 +430,10 @@ impl AppState {
                         removable.select_nth_unstable_by_key(pivot, |(_, t)| *t);
                         for (id, _) in removable.into_iter().take(to_remove) {
                             jobs.remove(&id);
+                            // Job handles for completed/failed jobs are already
+                            // finished (or about to be dropped); drop the JoinHandle
+                            // too so it doesn't linger in the map forever.
+                            self.job_handles.remove(&id);
                         }
                     }
                 }
@@ -350,10 +454,59 @@ impl AppState {
         }
 
         // Truncate completed studies
-        let mut studies = self.completed_studies.write().await;
-        if studies.len() > Self::MAX_COMPLETED_STUDIES {
-            let drain_count = studies.len() - Self::MAX_COMPLETED_STUDIES;
-            studies.drain(..drain_count);
+        {
+            let mut studies = self.completed_studies.write().await;
+            if studies.len() > Self::MAX_COMPLETED_STUDIES {
+                let drain_count = studies.len() - Self::MAX_COMPLETED_STUDIES;
+                studies.drain(..drain_count);
+            }
+        }
+
+        // Evict datasets: (a) oldest-first once over MAX_STORED_DATASETS, and (b) any
+        // whose retention policy has expired (`retention_manager.get_expired()`).
+        // The currently-active dataset is never evicted out from under a caller.
+        {
+            let current = self.current_dataset_id.read().await.clone();
+
+            let over_cap: Vec<String> = {
+                let datasets = self.datasets.read().await;
+                if datasets.len() > Self::MAX_STORED_DATASETS {
+                    let to_remove = datasets.len() - Self::MAX_STORED_DATASETS;
+                    let mut candidates: Vec<(String, chrono::DateTime<chrono::Utc>)> = datasets.iter()
+                        .filter(|(id, _)| Some(id.as_str()) != current.as_deref())
+                        .map(|(id, info)| (id.clone(), info.created_at))
+                        .collect();
+                    candidates.sort_by_key(|(_, t)| *t);
+                    candidates.into_iter().take(to_remove).map(|(id, _)| id).collect()
+                } else {
+                    Vec::new()
+                }
+            };
+            for id in &over_cap {
+                self.datasets.write().await.remove(id);
+                self.dataset_frames.write().await.remove(id);
+                self.retention_manager.mark_deleted(id, "evicted: over MAX_STORED_DATASETS cap");
+            }
+
+            let expired = self.retention_manager.get_expired();
+            for record in expired {
+                if Some(record.dataset_id.as_str()) == current.as_deref() {
+                    continue;
+                }
+                let removed_info = self.datasets.write().await.remove(&record.dataset_id);
+                self.dataset_frames.write().await.remove(&record.dataset_id);
+                self.retention_manager.mark_deleted(&record.dataset_id, "retention period expired");
+                if let Some(info) = removed_info {
+                    if let Err(e) = std::fs::remove_file(&info.path) {
+                        tracing::warn!(
+                            dataset_id = %record.dataset_id,
+                            path = ?info.path,
+                            error = %e,
+                            "Failed to delete expired dataset file from disk (best-effort)"
+                        );
+                    }
+                }
+            }
         }
     }
 

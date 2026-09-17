@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
+use crate::error::{AutoMLError, Result};
+
 /// Quantization data type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum QuantizationType {
@@ -74,6 +76,29 @@ impl Default for QuantizationConfig {
             symmetric_range: true,
             clip_percentile: None,
         }
+    }
+}
+
+impl QuantizationConfig {
+    /// Validate the configuration, returning a clear error for out-of-range values
+    /// instead of letting them reach unchecked arithmetic (e.g. `num_bits - 1`, which
+    /// panics with "attempt to subtract with overflow" if `num_bits == 0`).
+    pub fn validate(&self) -> Result<()> {
+        if self.num_bits == 0 || self.num_bits > 16 {
+            return Err(AutoMLError::ConfigError(format!(
+                "QuantizationConfig.num_bits must be in 1..=16, got {}",
+                self.num_bits
+            )));
+        }
+        if let Some(p) = self.clip_percentile {
+            if !(0.0..=100.0).contains(&p) {
+                return Err(AutoMLError::ConfigError(format!(
+                    "QuantizationConfig.clip_percentile must be in [0.0, 100.0], got {}",
+                    p
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -176,8 +201,12 @@ impl Quantizer {
     
     /// Get quantization range based on config
     fn get_quantization_range(config: &QuantizationConfig) -> (i32, i32) {
-        let num_bits = config.num_bits;
-        
+        // Clamp to a safe range to avoid "attempt to subtract with overflow" panics
+        // below when `num_bits` is 0, and to keep the bit-shifts well within i32 range.
+        // `QuantizationConfig.num_bits` has no validation before reaching this point
+        // (it can come from an unchecked config), so this is a defensive floor/ceiling.
+        let num_bits = config.num_bits.clamp(1, 16);
+
         match config.quantization_type {
             QuantizationType::Int8 => {
                 let half = 1i32 << (num_bits - 1);
@@ -235,14 +264,26 @@ impl Quantizer {
         }
         
         if let Some(percentile) = self.config.clip_percentile {
-            // Use percentile-based clipping
+            // Use percentile-based clipping. `percentile` is the amount of the
+            // *central* mass to keep (e.g. 99 => keep the central 99%, clipping
+            // (100-99)/2 = 0.5% off each tail). Clamp defensively in case an
+            // unvalidated config carries a value outside [0, 100].
+            let percentile = percentile.clamp(0.0, 100.0);
             let mut sorted: Vec<f64> = data.iter().copied().collect();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            
-            let low_idx = ((percentile / 100.0) * (sorted.len() - 1) as f64) as usize;
-            let high_idx = (((100.0 - percentile) / 100.0) * (sorted.len() - 1) as f64) as usize;
-            
-            (sorted[low_idx], sorted[high_idx])
+
+            let max_idx = sorted.len().saturating_sub(1);
+            let tail_fraction = (100.0 - percentile) / 200.0;
+            let low_idx = ((tail_fraction * max_idx as f64).round() as usize).min(max_idx);
+            let high_idx = (((1.0 - tail_fraction) * max_idx as f64).round() as usize).min(max_idx);
+
+            let (mut min_val, mut max_val) = (sorted[low_idx], sorted[high_idx]);
+            if min_val > max_val {
+                std::mem::swap(&mut min_val, &mut max_val);
+            }
+            debug_assert!(min_val <= max_val, "compute_range: min_val must be <= max_val");
+
+            (min_val, max_val)
         } else {
             let min_val = data.iter().copied().fold(f64::INFINITY, f64::min);
             let max_val = data.iter().copied().fold(f64::NEG_INFINITY, f64::max);

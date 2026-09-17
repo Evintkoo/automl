@@ -86,25 +86,42 @@ impl QuantizationCalibrator {
     
     /// Collect calibration data
     pub fn collect(&mut self, data: &[f64]) {
+        let had_samples = self.sample_count > 0;
+        let mut batch_min = f64::INFINITY;
+        let mut batch_max = f64::NEG_INFINITY;
+        let mut batch_has_finite = false;
+
         for &value in data {
             if value.is_finite() {
                 self.min_val = self.min_val.min(value);
                 self.max_val = self.max_val.max(value);
                 self.sample_count += 1;
-                
-                // Update moving average
-                if self.sample_count == 1 {
-                    self.ema_min = value;
-                    self.ema_max = value;
-                } else {
-                    self.ema_min = self.moving_average_alpha * value.min(self.ema_min) 
-                        + (1.0 - self.moving_average_alpha) * self.ema_min;
-                    self.ema_max = self.moving_average_alpha * value.max(self.ema_max) 
-                        + (1.0 - self.moving_average_alpha) * self.ema_max;
-                }
+                batch_min = batch_min.min(value);
+                batch_max = batch_max.max(value);
+                batch_has_finite = true;
             }
         }
-        
+
+        // Update moving average. The EMA update is applied once per batch, using
+        // the batch's own min/max as the new observation - this is the standard
+        // "moving average min/max observer" pattern (as used e.g. by TensorRT /
+        // PyTorch calibrators) and, unlike blending `value.min(ema_min)` into
+        // `ema_min`, it lets the tracked bound move in *either* direction as the
+        // underlying data distribution drifts (relaxing back inward when the
+        // distribution narrows), instead of being a one-way ratchet that can only
+        // ever expand outward.
+        if batch_has_finite {
+            if !had_samples {
+                self.ema_min = batch_min;
+                self.ema_max = batch_max;
+            } else {
+                self.ema_min = self.moving_average_alpha * batch_min
+                    + (1.0 - self.moving_average_alpha) * self.ema_min;
+                self.ema_max = self.moving_average_alpha * batch_max
+                    + (1.0 - self.moving_average_alpha) * self.ema_max;
+            }
+        }
+
         // Update histogram if needed
         if matches!(self.method, CalibrationMethod::Histogram | CalibrationMethod::Entropy) {
             self.update_histogram(data);
@@ -165,7 +182,13 @@ impl QuantizationCalibrator {
             return (self.min_val, self.max_val);
         }
         
-        let threshold = (total as f64 * (1.0 - self.percentile / 100.0)) as u64;
+        // Split the excluded mass evenly across both tails: excluding
+        // `tail_fraction` from the low tail AND `tail_fraction` from the high
+        // tail totals `(100 - percentile)/100` excluded, matching the intended
+        // "keep the central `percentile`%" semantics (mirrors
+        // `quantizer.rs::compute_range`'s `tail_fraction` calculation).
+        let tail_fraction = (100.0 - self.percentile) / 200.0;
+        let threshold = (total as f64 * tail_fraction) as u64;
         
         // Find min bin
         let mut cumsum = 0u64;

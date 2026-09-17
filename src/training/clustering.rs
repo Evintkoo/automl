@@ -117,6 +117,11 @@ impl KMeans {
     /// Fit the model (unsupervised — no y needed)
     pub fn fit(&mut self, x: &Array2<f64>) -> Result<&mut Self> {
         let n_samples = x.nrows();
+        if self.n_clusters == 0 {
+            return Err(AutoMLError::TrainingError(
+                "n_clusters must be at least 1".to_string()
+            ));
+        }
         if n_samples < self.n_clusters {
             return Err(AutoMLError::TrainingError(format!(
                 "n_samples ({}) < n_clusters ({})", n_samples, self.n_clusters
@@ -196,8 +201,31 @@ impl KMeans {
             }
         }
 
-        // Inertia from last assignment distances (avoids recomputation)
-        let inertia: f64 = last_distances.iter().sum();
+        // `labels`/`last_distances` above were computed against the centroids as they stood
+        // BEFORE this loop's final update step. On every exit path (convergence break via
+        // `changed == 0` or `shift < tol`, or simply exhausting `max_iter`), `centroids` has
+        // just been reassigned to `new_centroids`, so the stored labels/inertia would lag the
+        // final centroids by one iteration otherwise. Recompute them against the now-final
+        // `centroids` so `model.inertia()` always equals the true sum-of-squared-distances to
+        // `model.centroids()`, and `model.labels()` always reflects the final centroids.
+        let final_assignments: Vec<(usize, f64)> = (0..n_samples)
+            .into_par_iter()
+            .map(|i| {
+                let row = x.row(i);
+                let mut best_c = 0;
+                let mut best_dist = f64::MAX;
+                for c in 0..self.n_clusters {
+                    let d = Self::euclidean_sq(&row, &centroids.row(c));
+                    if d < best_dist {
+                        best_dist = d;
+                        best_c = c;
+                    }
+                }
+                (best_c, best_dist)
+            })
+            .collect();
+        labels = Array1::from_vec(final_assignments.iter().map(|&(c, _)| c as f64).collect());
+        let inertia: f64 = final_assignments.iter().map(|&(_, d)| d).sum();
 
         self.centroids = Some(centroids);
         self.labels = Some(labels);

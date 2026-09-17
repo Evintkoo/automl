@@ -441,15 +441,45 @@ impl GPSampler {
                 }
             }
             AcquisitionFunction::LCB { kappa } => {
-                // Lower Confidence Bound (for minimization)
-                mean - kappa * std
+                // Lower Confidence Bound (for minimization): the "confidence
+                // bound" itself is `mean - kappa*std`, and lower is better.
+                // Candidate selection in `sample()` always argmaxes the
+                // acquisition score, so we must return the *negated* bound
+                // (equivalently `kappa*std - mean`) when minimizing so that
+                // low mean + high uncertainty scores highest. When
+                // maximizing, mirror `UCB`'s maximize branch so a high mean
+                // with high uncertainty is preferred instead.
+                if self.minimize {
+                    kappa * std - mean
+                } else {
+                    mean + kappa * std
+                }
             }
             AcquisitionFunction::ThompsonSampling => {
-                // Thompson sampling: return sample from posterior
-                mean
+                // Deterministic approximation of Thompson sampling: use the
+                // posterior mean as the "sample" (a full implementation
+                // would draw a random sample from N(mean, var) instead).
+                // `sample()` always argmaxes the acquisition score, so when
+                // minimizing we negate the mean to turn "argmin mean" into
+                // "argmax -mean" — matching how the other acquisition
+                // functions in this file branch on `self.minimize`.
+                if self.minimize {
+                    -mean
+                } else {
+                    mean
+                }
             }
             AcquisitionFunction::EIWithNoise { xi } => {
-                expected_improvement_with_noise(mean, std, self.best_y, xi)
+                // Mirror EI/PI's direction handling. `expected_improvement_with_noise`
+                // is written for the maximize convention (`mu - best - xi`); for a
+                // minimize study we get the minimize-convention formula
+                // (`best - mu - xi`) by negating both `mu` and `best` before calling
+                // it, which keeps the shared helper (and its tests) untouched.
+                if self.minimize {
+                    expected_improvement_with_noise(-mean, std, -self.best_y, xi)
+                } else {
+                    expected_improvement_with_noise(mean, std, self.best_y, xi)
+                }
             }
         }
     }

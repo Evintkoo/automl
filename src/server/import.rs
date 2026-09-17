@@ -3,11 +3,25 @@
 use tracing::{info, warn};
 use std::net::IpAddr;
 
-/// Build an HTTP client with SSRF-safe redirect policy
+/// Build an HTTP client with SSRF-safe redirect policy. When `pin` is provided, the
+/// client is forced to connect to that exact (host, socket address) pair instead of
+/// performing its own DNS resolution — this closes a DNS-rebinding TOCTOU where a
+/// low-TTL attacker-controlled domain could resolve to a public IP during
+/// `validate_url_safety` but to a private/internal IP (e.g. 169.254.169.254,
+/// 127.0.0.1) when reqwest independently re-resolves it to make the actual request.
 fn safe_http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    safe_http_client_pinned(timeout_secs, None)
+}
+
+fn safe_http_client_pinned(
+    timeout_secs: u64,
+    pin: Option<(&str, std::net::SocketAddr)>,
+) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(timeout_secs))
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            // Redirect targets are re-validated here on every hop (kept as-is); the
+            // initial connection's IP pinning is handled separately via `.resolve()`.
             if attempt.previous().len() >= 5 {
                 attempt.error("too many redirects")
             } else if let Some(host) = attempt.url().host_str() {
@@ -28,9 +42,49 @@ fn safe_http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
             } else {
                 attempt.error("redirect has no host")
             }
-        }))
+        }));
+
+    if let Some((host, addr)) = pin {
+        builder = builder.resolve(host, addr);
+    }
+
+    builder
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))
+}
+
+/// Resolve `host` to a concrete, validated (non-private/non-reserved) socket address so
+/// the caller can pin the actual HTTP connection to it. This performs the DNS
+/// resolution exactly once and validates every returned address, then returns a single
+/// address to connect to — preventing a second, independent DNS lookup (as reqwest
+/// would otherwise perform internally) from returning a different, unvalidated IP.
+fn resolve_validated_socket_addr(host: &str, port: u16) -> Result<std::net::SocketAddr, String> {
+    // Host is already a literal IP - validate directly, no DNS involved.
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_private_ip(&ip) {
+            return Err("Access to private/reserved IP addresses is not allowed".to_string());
+        }
+        return Ok(std::net::SocketAddr::new(ip, port));
+    }
+
+    let addrs: Vec<std::net::SocketAddr> =
+        std::net::ToSocketAddrs::to_socket_addrs(&(host, port))
+            .map_err(|e| format!("DNS resolution failed for host '{}': {}", host, e))?
+            .collect();
+
+    if addrs.is_empty() {
+        return Err(format!("DNS resolution returned no addresses for host '{}'", host));
+    }
+
+    for addr in &addrs {
+        if is_private_ip(&addr.ip()) {
+            return Err("URL resolves to a private/reserved IP address".to_string());
+        }
+    }
+
+    // Pin to the first validated address; every candidate was checked above, so any of
+    // them is safe, but using a single fixed address is what makes pinning effective.
+    Ok(addrs[0])
 }
 
 /// Check if an IP address is in a private/reserved range (SSRF protection)
@@ -242,7 +296,21 @@ pub async fn download_dataset(url: &str, source: &SourceType) -> Result<(Vec<u8>
 
     info!(url = %download_url, source = %source, "Downloading dataset");
 
-    let client = safe_http_client(300)?;
+    // Re-resolve and re-validate the actual download host right before connecting, and
+    // pin the connection to that exact validated IP. Without this, `validate_url_safety`
+    // above and reqwest's own internal DNS lookup during `.send()` are two independent
+    // resolutions of the same hostname; a low-TTL DNS record could answer safely for the
+    // first and point at a private/internal address (e.g. 169.254.169.254) for the
+    // second, bypassing the SSRF guard entirely (DNS-rebinding TOCTOU).
+    let parsed_download_url = url::Url::parse(&download_url)
+        .map_err(|e| format!("Invalid download URL: {}", e))?;
+    let download_host = parsed_download_url.host_str()
+        .ok_or_else(|| "Download URL has no host".to_string())?
+        .to_string();
+    let download_port = parsed_download_url.port_or_known_default().unwrap_or(443);
+    let pinned_addr = resolve_validated_socket_addr(&download_host, download_port)?;
+
+    let client = safe_http_client_pinned(300, Some((&download_host, pinned_addr)))?;
 
     let response = client.get(&download_url)
         .header("User-Agent", "AutoML/0.5")

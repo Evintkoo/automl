@@ -121,12 +121,18 @@ impl GradientBoostingRegressor {
                 .with_min_samples_leaf(self.config.min_samples_leaf);
             tree.fit(&x_sub, &y_sub)?;
             
-            // Update predictions (with learning rate)
-            let tree_pred = tree.predict(&x_sub)?;
-            for (i, &idx) in sample_indices.iter().enumerate() {
-                predictions[idx] += self.config.learning_rate * tree_pred[i];
-            }
-            
+            // Update the running `predictions` cache for ALL rows, not just the ones sampled
+            // to fit this round's tree — subsampling should only affect which rows are used
+            // to FIT the weak learner, not which rows get this round's contribution applied.
+            // Predicting only on `sample_indices` and leaving the rest stale would make
+            // `predictions` diverge from what a fresh `predict()` call computes. The tree was
+            // trained on the column-subsampled feature space, so we predict on all rows
+            // restricted to the same `col_indices` (matching `predict()` below).
+            // See lightgbm.rs/catboost.rs for the same pattern.
+            let x_col_sub = x.select(ndarray::Axis(1), &col_indices);
+            let tree_pred_all = tree.predict(&x_col_sub)?;
+            predictions.scaled_add(self.config.learning_rate, &tree_pred_all);
+
             // Accumulate feature importance
             if let Some(tree_importance) = tree.feature_importances() {
                 for (j, &col_idx) in col_indices.iter().enumerate() {
@@ -279,12 +285,14 @@ impl GradientBoostingClassifier {
                 .with_min_samples_leaf(self.config.min_samples_leaf);
             tree.fit(&x_sub, &y_sub)?;
             
-            // Update log odds
-            let tree_pred = tree.predict(&x_sub)?;
-            for (i, &idx) in sample_indices.iter().enumerate() {
-                log_odds[idx] += self.config.learning_rate * tree_pred[i];
-            }
-            
+            // Update the running `log_odds` cache for ALL rows, not just the sampled ones
+            // used to fit this round's tree — see the matching comment in
+            // GradientBoostingRegressor::fit for why (keeps the cache consistent with a
+            // fresh `predict_proba()` call regardless of `subsample`).
+            let x_col_sub = x.select(ndarray::Axis(1), &col_indices);
+            let tree_pred_all = tree.predict(&x_col_sub)?;
+            log_odds.scaled_add(self.config.learning_rate, &tree_pred_all);
+
             // Accumulate feature importance
             if let Some(tree_importance) = tree.feature_importances() {
                 for (j, &col_idx) in col_indices.iter().enumerate() {

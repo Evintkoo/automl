@@ -431,7 +431,15 @@ pub fn cmd_benchmark(
 
     println!("  {}", dim(&"─".repeat(46)));
 
-    if let Some((name, score, _)) = results.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()) {
+    let nan_models: Vec<&str> = results.iter()
+        .filter(|(_, score, _)| score.is_nan())
+        .map(|(name, _, _)| name.as_str())
+        .collect();
+    if !nan_models.is_empty() {
+        println!("  {} {}", "warn:".yellow(), format!("model(s) produced a NaN metric: {}", nan_models.join(", ")).yellow());
+    }
+
+    if let Some((name, score, _)) = results.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)) {
         println!();
         println!("  {} {} {} {:.4}",
             ok("best"),

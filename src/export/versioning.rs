@@ -10,7 +10,7 @@ use std::io::{Read, Write, BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 
 use crate::error::{AutoMLError, Result};
-use super::serializer::ModelMetadata;
+use super::serializer::{ModelMetadata, deserialize_bounded};
 
 /// Semantic version
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -219,14 +219,19 @@ impl ModelRegistry {
         Ok(Self { root, index })
     }
 
-    /// Save registry index
-    fn save_index(&self) -> Result<()> {
-        let index_path = self.root.join("index.json");
+    /// Persist a given index snapshot to `index.json` under `root`, without
+    /// touching any in-memory state. Split out from `save_index` so callers
+    /// (e.g. `register`/`delete`) can persist a staged/candidate index and
+    /// only commit it to `self.index` once the write has actually succeeded -
+    /// this keeps `self.index` from ever diverging from what's durably on
+    /// disk after a failed operation.
+    fn write_index(root: &Path, index: &RegistryIndex) -> Result<()> {
+        let index_path = root.join("index.json");
         let file = File::create(&index_path).map_err(|e| {
             AutoMLError::DataError(format!("Failed to create index: {}", e))
         })?;
-        
-        serde_json::to_writer_pretty(BufWriter::new(file), &self.index).map_err(|e| {
+
+        serde_json::to_writer_pretty(BufWriter::new(file), index).map_err(|e| {
             AutoMLError::SerializationError(format!("Failed to write index: {}", e))
         })?;
 
@@ -239,6 +244,20 @@ impl ModelRegistry {
         name: &str,
         versioned: &VersionedModel<M>,
     ) -> Result<String> {
+        // Reject duplicate (name, version) registrations up front instead of
+        // silently pushing a second index entry that points at the same
+        // underlying file. Mirrors the collision-rejection convention used by
+        // `ProvenanceTracker::register_dataset` (see src/provenance/mod.rs).
+        if let Some(existing) = self.index.models.get(name) {
+            if existing.iter().any(|e| e.version == versioned.version) {
+                return Err(AutoMLError::DataError(format!(
+                    "Model '{}' version {} is already registered; refusing to register a \
+                     duplicate entry. Delete the existing version first if you intend to replace it.",
+                    name, versioned.version
+                )));
+            }
+        }
+
         // Create model directory
         let model_dir = self.root.join(name);
         if !model_dir.exists() {
@@ -275,21 +294,25 @@ impl ModelRegistry {
             registered_at: String::new(),
         };
 
-        // Update index
-        self.index.models
+        // Stage the mutation on a clone of the index and only persist/commit
+        // it after the fallible I/O has run. If `write_index` fails, we
+        // return `Err` here with `self.index` completely untouched, so it
+        // never diverges from what's actually on disk.
+        let mut staged_index = self.index.clone();
+        staged_index.models
             .entry(name.to_string())
             .or_default()
             .push(entry);
 
-        // Update tag index
         for tag in &versioned.tags {
-            self.index.tags
+            staged_index.tags
                 .entry(tag.clone())
                 .or_default()
                 .push((name.to_string(), versioned.version.clone()));
         }
 
-        self.save_index()?;
+        Self::write_index(&self.root, &staged_index)?;
+        self.index = staged_index;
 
         Ok(relative_path)
     }
@@ -341,7 +364,9 @@ impl ModelRegistry {
             AutoMLError::DataError(format!("Failed to read model: {}", e))
         })?;
 
-        bincode::deserialize(&bytes).map_err(|e| {
+        // Use a bounded bincode configuration: these files may be untrusted/corrupted,
+        // and bincode 1.3's default config has no size limit on decoded allocations.
+        deserialize_bounded(&bytes).map_err(|e| {
             AutoMLError::SerializationError(format!("Failed to deserialize: {}", e))
         })
     }
@@ -365,7 +390,7 @@ impl ModelRegistry {
 
     /// Delete a model version
     pub fn delete(&mut self, name: &str, version: &ModelVersion) -> Result<()> {
-        let entries = self.index.models.get_mut(name).ok_or_else(|| {
+        let entries = self.index.models.get(name).ok_or_else(|| {
             AutoMLError::DataError(format!("Model not found: {}", name))
         })?;
 
@@ -374,29 +399,51 @@ impl ModelRegistry {
                 AutoMLError::DataError(format!("Version not found: {}", version))
             })?;
 
-        let entry = entries.remove(idx);
+        // Stage every mutation on a clone of the index first, exactly like
+        // `register`, so a failed I/O step leaves `self.index` untouched
+        // rather than partially applied.
+        let mut staged_index = self.index.clone();
+        let entry = {
+            let staged_entries = staged_index.models.get_mut(name)
+                .expect("presence checked above via self.index");
+            staged_entries.remove(idx)
+        };
 
-        // Remove file
-        let path = self.root.join(&entry.path);
-        if path.exists() {
-            fs::remove_file(&path).map_err(|e| {
-                AutoMLError::DataError(format!("Failed to delete file: {}", e))
-            })?;
-        }
-
-        // Update tag index
+        // Update tag index (staged copy)
         for tag in &entry.tags {
-            if let Some(tagged) = self.index.tags.get_mut(tag) {
+            if let Some(tagged) = staged_index.tags.get_mut(tag) {
                 tagged.retain(|(n, v)| n != name || v != version);
             }
         }
 
         // Clean up empty entries
-        if entries.is_empty() {
-            self.index.models.remove(name);
+        if staged_index.models.get(name).map(|e| e.is_empty()).unwrap_or(false) {
+            staged_index.models.remove(name);
         }
 
-        self.save_index()
+        // Only remove the underlying file if no other surviving entry (across
+        // the whole registry, not just this model's versions) still
+        // references the same path - defensive in case entries can
+        // legitimately share a path.
+        let path_still_referenced = staged_index.models.values()
+            .flatten()
+            .any(|e| e.path == entry.path);
+
+        if !path_still_referenced {
+            let path = self.root.join(&entry.path);
+            if path.exists() {
+                fs::remove_file(&path).map_err(|e| {
+                    AutoMLError::DataError(format!("Failed to delete file: {}", e))
+                })?;
+            }
+        }
+
+        // Persist the staged index and only commit it in-memory once the
+        // write durably succeeds.
+        Self::write_index(&self.root, &staged_index)?;
+        self.index = staged_index;
+
+        Ok(())
     }
 }
 

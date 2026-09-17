@@ -230,7 +230,13 @@ impl PMMLExporter {
         })?;
         let mut writer = BufWriter::new(file);
 
-        self.write_pmml(&mut writer, doc)
+        self.write_pmml(&mut writer, doc)?;
+
+        // Ensure buffered bytes actually reach the OS before reporting success;
+        // BufWriter's Drop impl flushes but silently discards any I/O error.
+        writer.flush().map_err(Self::io_err)?;
+
+        Ok(())
     }
 
     /// Export to string

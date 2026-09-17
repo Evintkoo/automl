@@ -92,7 +92,7 @@ impl ArchitectureWeights {
         let probs = self.edge_probs(node, prev, is_reduce);
         probs.iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, _)| i)
             .unwrap_or(0)
     }
@@ -128,6 +128,21 @@ pub struct DARTSSearch {
     rng: Xoshiro256PlusPlus,
     /// Search history
     history: Vec<SearchStep>,
+    /// `val_acc` from the previous perturbed step, used to judge whether the
+    /// last architecture-weight perturbation helped (see `step`).
+    prev_val_acc: Option<f64>,
+    /// Architecture weights as they were *before* the most recent
+    /// perturbation was applied, so a perturbation that turns out to hurt
+    /// `val_acc` can be reverted exactly.
+    last_step_snapshot: Option<(Array3<f64>, Array3<f64>)>,
+    /// The (unscaled) perturbation direction last applied, reused (and
+    /// decayed) when it improved `val_acc`, or discarded in favor of a fresh
+    /// random direction otherwise.
+    last_direction_normal: Option<Array3<f64>>,
+    last_direction_reduce: Option<Array3<f64>>,
+    /// Current perturbation magnitude for the hill-climbing search. Grows
+    /// (decays slowly) on success, shrinks on failure.
+    step_scale: f64,
 }
 
 /// A single search step record
@@ -159,6 +174,11 @@ impl DARTSSearch {
             best_arch: None,
             rng,
             history: Vec::new(),
+            prev_val_acc: None,
+            last_step_snapshot: None,
+            last_direction_normal: None,
+            last_direction_reduce: None,
+            step_scale: 0.02,
         }
     }
 
@@ -191,15 +211,15 @@ impl DARTSSearch {
                 let best_op = probs.iter()
                     .enumerate()
                     .filter(|(i, _)| ops[*i] != OperationType::None)
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap());
-                
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal));
+
                 if let Some((op_idx, &score)) = best_op {
                     edge_scores.push((prev, op_idx, score));
                 }
             }
 
             // Sort by score and take top 2
-            edge_scores.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+            edge_scores.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
             
             for (prev, op_idx, _) in edge_scores.into_iter().take(2) {
                 let op_type = ops[op_idx];
@@ -222,14 +242,14 @@ impl DARTSSearch {
                 let best_op = probs.iter()
                     .enumerate()
                     .filter(|(i, _)| ops[*i] != OperationType::None)
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap());
-                
+                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal));
+
                 if let Some((op_idx, &score)) = best_op {
                     edge_scores.push((prev, op_idx, score));
                 }
             }
 
-            edge_scores.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+            edge_scores.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
             
             for (prev, op_idx, _) in edge_scores.into_iter().take(2) {
                 let op_type = ops[op_idx];
@@ -246,10 +266,20 @@ impl DARTSSearch {
     }
 
     /// Perform one step of architecture search
-    /// 
-    /// In a full implementation, this would:
-    /// 1. Train network weights on training data
-    /// 2. Update architecture weights on validation data
+    ///
+    /// NOTE: this is a **simplified hill-climbing / (1+1)-evolutionary-strategy**
+    /// approximation of DARTS' bi-level gradient-based optimization, not the
+    /// paper's exact method. A full second-order bi-level DARTS
+    /// implementation requires autodiff through both operation weights (`w`)
+    /// and architecture weights (`alpha`) on real train/val batches, which
+    /// this crate does not have. Instead, each round perturbs `alpha` by a
+    /// random direction and uses the *actual* `val_acc` signal to decide
+    /// whether to keep or revert that perturbation: if `val_acc` improved
+    /// since the previous round, the perturbation is kept and the search
+    /// continues in a similar direction (with slowly decaying magnitude);
+    /// if it got worse, the perturbation is reverted and a fresh random
+    /// direction (with a smaller step) is tried next. This is honest,
+    /// direction-aware local search, not literal noise.
     pub fn step(&mut self, train_loss: f64, val_loss: f64, val_acc: f64) {
         self.epoch += 1;
 
@@ -267,31 +297,94 @@ impl DARTSSearch {
             self.best_arch = Some(self.derive_architecture());
         }
 
-        // Simulate architecture weight update (in practice, use actual gradients)
         if self.epoch > self.config.warmup_epochs {
             let num_nodes = self.config.nodes_per_cell;
             let num_ops = self.search_space.num_operations();
             let max_inputs = num_nodes + 2;
 
-            // Create random gradients (placeholder for actual gradient computation)
-            let grad_scale = 0.01 * (1.0 - val_acc);
-            let mut grad_normal = Array3::zeros((num_nodes, max_inputs, num_ops));
-            let mut grad_reduce = Array3::zeros((num_nodes, max_inputs, num_ops));
+            // Did the perturbation applied in the *previous* round help?
+            // `val_acc` here is this round's result, i.e. the outcome of
+            // whatever perturbation was applied last time.
+            let has_prior_step = self.last_step_snapshot.is_some();
+            let improved = match self.prev_val_acc {
+                Some(prev) if has_prior_step => val_acc > prev,
+                _ => true, // no prior perturbation to judge yet
+            };
 
-            for val in grad_normal.iter_mut() {
-                *val = (self.rng.gen::<f64>() - 0.5) * grad_scale;
-            }
-            for val in grad_reduce.iter_mut() {
-                *val = (self.rng.gen::<f64>() - 0.5) * grad_scale;
+            if has_prior_step {
+                if improved {
+                    // Keep the change; explore a bit further with a slowly
+                    // decaying magnitude in a similar direction.
+                    self.step_scale = (self.step_scale * 0.9).max(1e-4);
+                } else {
+                    // Revert to the pre-perturbation weights and shrink the
+                    // step so the next (different) random direction is more
+                    // conservative.
+                    if let Some((snap_n, snap_r)) = self.last_step_snapshot.take() {
+                        self.arch_weights.alpha_normal = snap_n;
+                        self.arch_weights.alpha_reduce = snap_r;
+                    }
+                    self.step_scale = (self.step_scale * 0.5).max(1e-4);
+                }
             }
 
-            self.arch_weights.update(
-                &grad_normal,
-                &grad_reduce,
-                self.config.arch_learning_rate,
-                self.config.arch_weight_decay,
-            );
+            // Snapshot current (possibly just-reverted) weights so the next
+            // round can judge/undo the perturbation we're about to apply.
+            self.last_step_snapshot = Some((
+                self.arch_weights.alpha_normal.clone(),
+                self.arch_weights.alpha_reduce.clone(),
+            ));
+
+            // Pick a perturbation direction: reuse the last one if it just
+            // improved val_acc (informed continuation), otherwise sample a
+            // fresh random direction (the last one failed).
+            let (dir_normal, dir_reduce) = if improved {
+                match (&self.last_direction_normal, &self.last_direction_reduce) {
+                    (Some(n), Some(r)) => (n.clone(), r.clone()),
+                    _ => Self::random_direction(num_nodes, max_inputs, num_ops, &mut self.rng),
+                }
+            } else {
+                Self::random_direction(num_nodes, max_inputs, num_ops, &mut self.rng)
+            };
+
+            let delta_normal = dir_normal.mapv(|v| v * self.step_scale);
+            let delta_reduce = dir_reduce.mapv(|v| v * self.step_scale);
+
+            // Apply the perturbation with a small weight-decay shrinkage
+            // (keeps alpha bounded, mirroring `arch_weight_decay`'s role in
+            // the original SGD-style `ArchitectureWeights::update`).
+            let decay = 1.0 - self.config.arch_learning_rate * self.config.arch_weight_decay;
+            self.arch_weights.alpha_normal.zip_mut_with(&delta_normal, |a, d| {
+                *a = *a * decay + *d;
+            });
+            self.arch_weights.alpha_reduce.zip_mut_with(&delta_reduce, |a, d| {
+                *a = *a * decay + *d;
+            });
+
+            self.last_direction_normal = Some(dir_normal);
+            self.last_direction_reduce = Some(dir_reduce);
         }
+
+        self.prev_val_acc = Some(val_acc);
+    }
+
+    /// Sample a fresh random perturbation direction with unit-ish (`[-0.5, 0.5]`)
+    /// per-element magnitude; the caller scales it by `step_scale`.
+    fn random_direction(
+        num_nodes: usize,
+        max_inputs: usize,
+        num_ops: usize,
+        rng: &mut Xoshiro256PlusPlus,
+    ) -> (Array3<f64>, Array3<f64>) {
+        let mut dir_normal = Array3::zeros((num_nodes, max_inputs, num_ops));
+        let mut dir_reduce = Array3::zeros((num_nodes, max_inputs, num_ops));
+        for val in dir_normal.iter_mut() {
+            *val = rng.gen::<f64>() - 0.5;
+        }
+        for val in dir_reduce.iter_mut() {
+            *val = rng.gen::<f64>() - 0.5;
+        }
+        (dir_normal, dir_reduce)
     }
 
     /// Check if search is complete

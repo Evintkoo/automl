@@ -10,6 +10,37 @@ use std::path::Path;
 
 use crate::error::{AutoMLError, Result};
 
+/// Maximum size (in bytes) accepted for a single bincode-decoded value when reading
+/// model files from disk. bincode 1.3's default configuration has no size limit, so a
+/// crafted (or corrupted) length-prefixed `Vec`/`String` field in a tiny file could
+/// otherwise force a multi-GB allocation attempt and abort the process. This bounds
+/// every deserialize of untrusted/external model-file bytes.
+pub(crate) const MAX_DESERIALIZE_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
+
+/// Deserialize bytes using a bounded bincode configuration (see [`MAX_DESERIALIZE_BYTES`]).
+pub(crate) fn deserialize_bounded<T>(bytes: &[u8]) -> std::result::Result<T, bincode::Error>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    use bincode::Options;
+    bincode::DefaultOptions::new()
+        .with_limit(MAX_DESERIALIZE_BYTES)
+        .deserialize(bytes)
+}
+
+/// Deserialize from a reader using a bounded bincode configuration (see
+/// [`MAX_DESERIALIZE_BYTES`]).
+pub(crate) fn deserialize_bounded_from<R, T>(reader: R) -> std::result::Result<T, bincode::Error>
+where
+    R: Read,
+    T: for<'de> Deserialize<'de>,
+{
+    use bincode::Options;
+    bincode::DefaultOptions::new()
+        .with_limit(MAX_DESERIALIZE_BYTES)
+        .deserialize_from(reader)
+}
+
 /// Serialization format
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SerializationFormat {
@@ -176,7 +207,7 @@ pub trait ModelSerializer: Serialize + for<'de> Deserialize<'de> + Sized {
 
     /// Deserialize from bytes
     fn from_bytes(data: &[u8]) -> Result<Self> {
-        bincode::deserialize(data).map_err(|e| {
+        deserialize_bounded(data).map_err(|e| {
             AutoMLError::SerializationError(format!("Failed to deserialize: {}", e))
         })
     }
@@ -221,6 +252,12 @@ pub trait ModelSerializer: Serialize + for<'de> Deserialize<'de> + Sized {
             }
         }
 
+        // Ensure buffered bytes actually reach the OS before reporting success;
+        // BufWriter's Drop impl flushes but silently discards any I/O error.
+        writer.flush().map_err(|e| {
+            AutoMLError::DataError(format!("Failed to flush file: {}", e))
+        })?;
+
         Ok(())
     }
 
@@ -237,7 +274,7 @@ pub trait ModelSerializer: Serialize + for<'de> Deserialize<'de> + Sized {
                 reader.read_to_end(&mut bytes).map_err(|e| {
                     AutoMLError::DataError(format!("Failed to read: {}", e))
                 })?;
-                bincode::deserialize(&bytes).map_err(|e| {
+                deserialize_bounded(&bytes).map_err(|e| {
                     AutoMLError::SerializationError(format!("Failed to deserialize: {}", e))
                 })?
             }
@@ -247,6 +284,24 @@ pub trait ModelSerializer: Serialize + for<'de> Deserialize<'de> + Sized {
                 })?
             }
         };
+
+        // Reject files with an incompatible magic/format version before trusting the
+        // rest of the payload. Only an FNV checksum was previously verified, which
+        // guards self-consistency, not format identity - a file from an incompatible
+        // format/version (or an unrelated file that happens to bincode-decode) would
+        // otherwise be passed straight into `Self::from_bytes`.
+        if serialized.magic != SerializedModel::MAGIC {
+            return Err(AutoMLError::SerializationError(
+                "Unsupported model file: magic bytes mismatch".to_string()
+            ));
+        }
+        if serialized.format_version != SerializedModel::VERSION {
+            return Err(AutoMLError::SerializationError(format!(
+                "Unsupported model format version: {} (expected {})",
+                serialized.format_version,
+                SerializedModel::VERSION
+            )));
+        }
 
         // Verify checksum
         if !serialized.verify_checksum() {
@@ -274,10 +329,16 @@ pub fn save_model<M: Serialize>(
     let file = File::create(path.as_ref()).map_err(|e| {
         AutoMLError::DataError(format!("Failed to create file: {}", e))
     })?;
-    let writer = BufWriter::new(file);
+    let mut writer = BufWriter::new(file);
 
-    bincode::serialize_into(writer, &serialized).map_err(|e| {
+    bincode::serialize_into(&mut writer, &serialized).map_err(|e| {
         AutoMLError::SerializationError(format!("Failed to write: {}", e))
+    })?;
+
+    // Ensure buffered bytes actually reach the OS before reporting success;
+    // BufWriter's Drop impl flushes but silently discards any I/O error.
+    writer.flush().map_err(|e| {
+        AutoMLError::DataError(format!("Failed to flush file: {}", e))
     })?;
 
     Ok(())
@@ -290,9 +351,24 @@ pub fn load_model<M: for<'de> Deserialize<'de>>(path: impl AsRef<Path>) -> Resul
     })?;
     let reader = BufReader::new(file);
 
-    let serialized: SerializedModel = bincode::deserialize_from(reader).map_err(|e| {
+    let serialized: SerializedModel = deserialize_bounded_from(reader).map_err(|e| {
         AutoMLError::SerializationError(format!("Failed to deserialize: {}", e))
     })?;
+
+    // Reject files with an incompatible magic/format version before trusting the
+    // rest of the payload (see `ModelSerializer::load` for rationale).
+    if serialized.magic != SerializedModel::MAGIC {
+        return Err(AutoMLError::SerializationError(
+            "Unsupported model file: magic bytes mismatch".to_string()
+        ));
+    }
+    if serialized.format_version != SerializedModel::VERSION {
+        return Err(AutoMLError::SerializationError(format!(
+            "Unsupported model format version: {} (expected {})",
+            serialized.format_version,
+            SerializedModel::VERSION
+        )));
+    }
 
     if !serialized.verify_checksum() {
         return Err(AutoMLError::SerializationError(
@@ -300,7 +376,7 @@ pub fn load_model<M: for<'de> Deserialize<'de>>(path: impl AsRef<Path>) -> Resul
         ));
     }
 
-    let model: M = bincode::deserialize(&serialized.model_data).map_err(|e| {
+    let model: M = deserialize_bounded(&serialized.model_data).map_err(|e| {
         AutoMLError::SerializationError(format!("Failed to deserialize model: {}", e))
     })?;
 
@@ -327,10 +403,16 @@ pub fn save_model_json<M: Serialize>(
     let file = File::create(path.as_ref()).map_err(|e| {
         AutoMLError::DataError(format!("Failed to create file: {}", e))
     })?;
-    let writer = BufWriter::new(file);
+    let mut writer = BufWriter::new(file);
 
-    serde_json::to_writer_pretty(writer, &json_model).map_err(|e| {
+    serde_json::to_writer_pretty(&mut writer, &json_model).map_err(|e| {
         AutoMLError::SerializationError(format!("Failed to write JSON: {}", e))
+    })?;
+
+    // Ensure buffered bytes actually reach the OS before reporting success;
+    // BufWriter's Drop impl flushes but silently discards any I/O error.
+    writer.flush().map_err(|e| {
+        AutoMLError::DataError(format!("Failed to flush file: {}", e))
     })?;
 
     Ok(())

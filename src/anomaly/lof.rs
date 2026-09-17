@@ -192,8 +192,19 @@ impl LocalOutlierFactor {
 
         for row in x.rows() {
             let point: Vec<f64> = row.iter().copied().collect();
-            let neighbors = self.k_nearest_neighbors(&point, x_train, self.n_neighbors, None);
-            
+            let mut neighbors = self.k_nearest_neighbors(&point, x_train, self.n_neighbors, None);
+
+            // If the query point coincides with a training point (distance 0 to its
+            // nearest neighbor), that neighbor is almost certainly the point's own
+            // row in the training set (the common case of scoring the training data
+            // itself, e.g. via score_samples/predict/fit_predict on x_train). Recompute
+            // the k-NN set excluding that row, matching the `exclude_self` behavior
+            // already used during fit().
+            if let Some(&(zero_idx, _)) = neighbors.iter().find(|&&(_, d)| d == 0.0) {
+                neighbors =
+                    self.k_nearest_neighbors(&point, x_train, self.n_neighbors, Some(zero_idx));
+            }
+
             let k_dist = self.k_distance(&neighbors);
             k_distances.push(k_dist);
 
@@ -221,6 +232,13 @@ impl Default for LocalOutlierFactor {
 impl AnomalyDetector for LocalOutlierFactor {
     fn fit(&mut self, x: &Array2<f64>) -> Result<()> {
         let n = x.nrows();
+
+        if n < 2 {
+            return Err(AutoMLError::ValidationError(
+                "LocalOutlierFactor::fit requires at least 2 samples".to_string(),
+            ));
+        }
+
         let k = self.n_neighbors.min(n - 1).max(1);
 
         // Compute k-distances for all training points

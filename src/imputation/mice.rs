@@ -6,6 +6,20 @@ use ndarray::{Array1, Array2};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
+/// Compute the median of an already-sorted slice, averaging the two middle
+/// elements for an even-length slice instead of returning the upper-middle one.
+fn median_of_sorted(sorted: &[f64]) -> f64 {
+    let n = sorted.len();
+    if n == 0 {
+        return 0.0;
+    }
+    if n % 2 == 0 {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    } else {
+        sorted[n / 2]
+    }
+}
+
 /// MICE imputer using chained equations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MICEImputer {
@@ -88,7 +102,7 @@ impl MICEImputer {
             InitialStrategy::Median => {
                 let mut sorted = observed.clone();
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                sorted[sorted.len() / 2]
+                median_of_sorted(&sorted)
             }
             InitialStrategy::MostFrequent => {
                 // For continuous data, use mode approximation (most common bin)
@@ -273,11 +287,7 @@ impl Imputer for MICEImputer {
 
             let mut sorted = observed.clone();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let median = if sorted.is_empty() {
-                0.0
-            } else {
-                sorted[sorted.len() / 2]
-            };
+            let median = median_of_sorted(&sorted);
 
             let variance = if observed.is_empty() {
                 0.0

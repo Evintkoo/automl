@@ -6,6 +6,20 @@ use ndarray::{Array1, Array2};
 use rand::prelude::*;
 use serde::{Deserialize, Serialize};
 
+/// Compute the median of an already-sorted slice, averaging the two middle
+/// elements for an even-length slice instead of returning the upper-middle one.
+fn median_of_sorted(sorted: &[f64]) -> f64 {
+    let n = sorted.len();
+    if n == 0 {
+        return 0.0;
+    }
+    if n % 2 == 0 {
+        (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
+    } else {
+        sorted[n / 2]
+    }
+}
+
 /// Estimator type for iterative imputation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImputerEstimator {
@@ -106,7 +120,7 @@ impl IterativeImputer {
             InitialStrategy::Median => {
                 let mut sorted = observed.clone();
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-                sorted[sorted.len() / 2]
+                median_of_sorted(&sorted)
             }
             InitialStrategy::MostFrequent => {
                 observed.iter().sum::<f64>() / observed.len() as f64
@@ -365,11 +379,7 @@ impl Imputer for IterativeImputer {
 
             let mut sorted = observed.clone();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let median = if sorted.is_empty() {
-                0.0
-            } else {
-                sorted[sorted.len() / 2]
-            };
+            let median = median_of_sorted(&sorted);
 
             let missing = column.iter().any(|v| is_missing(*v));
 
