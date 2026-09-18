@@ -3,7 +3,7 @@
 //! Provides SVM classifier and regressor using SMO (Sequential Minimal Optimization) algorithm.
 
 use crate::error::{AutoMLError, Result};
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1};
 use rayon::prelude::*;
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
@@ -455,7 +455,7 @@ impl SVMClassifier {
             let mut k = Array2::zeros((n, n));
             for i in 0..n {
                 for j in i..n {
-                    let val = self.kernel(&x.row(i).to_owned(), &x.row(j).to_owned());
+                    let val = self.kernel(x.row(i), x.row(j));
                     k[[i, j]] = val;
                     k[[j, i]] = val;
                 }
@@ -463,20 +463,21 @@ impl SVMClassifier {
             return k;
         }
 
-        // Parallel: compute upper triangle rows in parallel
+        // Parallel: compute upper triangle rows in parallel. Reads rows
+        // directly as views instead of first copying every row into an
+        // owned `Vec<Vec<f64>>` and then cloning two of those per (i, j)
+        // pair (up to n^2/2 heap allocations) just to read their values —
+        // `x` (a shared reference to immutable data) and row views over it
+        // are both Send+Sync, so no intermediate copy is needed at all.
         let config = self.config.clone();
-        let x_data: Vec<Vec<f64>> = (0..n)
-            .map(|i| x.row(i).to_vec())
-            .collect();
 
         let rows: Vec<Vec<(usize, f64)>> = (0..n)
             .into_par_iter()
             .map(|i| {
-                let row_i = &x_data[i];
-                let a = Array1::from_vec(row_i.clone());
+                let a = x.row(i);
                 (i..n)
                     .map(|j| {
-                        let b = Array1::from_vec(x_data[j].clone());
+                        let b = x.row(j);
                         let val = match &config.kernel {
                             KernelType::Linear => a.dot(&b),
                             KernelType::Polynomial { degree, gamma, coef0 } => {
@@ -507,19 +508,19 @@ impl SVMClassifier {
     }
 
     /// Compute kernel between two vectors
-    fn kernel(&self, x1: &Array1<f64>, x2: &Array1<f64>) -> f64 {
+    fn kernel(&self, x1: ArrayView1<f64>, x2: ArrayView1<f64>) -> f64 {
         match &self.config.kernel {
-            KernelType::Linear => x1.dot(x2),
+            KernelType::Linear => x1.dot(&x2),
             KernelType::Polynomial { degree, gamma, coef0 } => {
-                (*gamma * x1.dot(x2) + coef0).powi((*degree).min(i32::MAX as usize) as i32)
+                (*gamma * x1.dot(&x2) + coef0).powi((*degree).min(i32::MAX as usize) as i32)
             }
             KernelType::RBF { gamma } => {
-                let diff = x1 - x2;
+                let diff = &x1 - &x2;
                 let norm_sq = diff.dot(&diff);
                 (-gamma * norm_sq).exp()
             }
             KernelType::Sigmoid { gamma, coef0 } => {
-                (*gamma * x1.dot(x2) + coef0).tanh()
+                (*gamma * x1.dot(&x2) + coef0).tanh()
             }
         }
     }
@@ -543,7 +544,7 @@ impl SVMClassifier {
     /// Compute the decision function score for a single sample using given SVM parameters
     fn score_sample(
         &self,
-        sample: &Array1<f64>,
+        sample: ArrayView1<f64>,
         sv: &Array2<f64>,
         alphas: &Array1<f64>,
         sv_labels: &Array1<f64>,
@@ -551,7 +552,7 @@ impl SVMClassifier {
     ) -> f64 {
         let mut sum = bias;
         for j in 0..sv.nrows() {
-            let k_val = self.kernel(sample, &sv.row(j).to_owned());
+            let k_val = self.kernel(sample, sv.row(j));
             sum += alphas[j] * sv_labels[j] * k_val;
         }
         sum
@@ -571,8 +572,8 @@ impl SVMClassifier {
             let alphas = self.alphas.as_ref().unwrap();
 
             (0..n).into_par_iter().map(|i| {
-                let sample = x.row(i).to_owned();
-                let score = self.score_sample(&sample, sv, alphas, sv_labels, self.bias);
+                let sample = x.row(i);
+                let score = self.score_sample(sample, sv, alphas, sv_labels, self.bias);
                 if score >= 0.0 {
                     self.classes[1] as f64
                 } else {
@@ -581,13 +582,13 @@ impl SVMClassifier {
             }).collect()
         } else {
             (0..n).into_par_iter().map(|i| {
-                let sample = x.row(i).to_owned();
+                let sample = x.row(i);
                 let mut best_score = f64::NEG_INFINITY;
                 let mut best_class = self.classes[0];
 
                 for (k, clf) in self.ovr_classifiers.iter().enumerate() {
                     let score = self.score_sample(
-                        &sample,
+                        sample,
                         &clf.support_vectors,
                         &clf.alphas,
                         &clf.support_labels,
@@ -620,16 +621,16 @@ impl SVMClassifier {
             let alphas = self.alphas.as_ref().unwrap();
 
             for i in 0..n {
-                let sample = x.row(i).to_owned();
-                scores[i] = self.score_sample(&sample, sv, alphas, sv_labels, self.bias);
+                let sample = x.row(i);
+                scores[i] = self.score_sample(sample, sv, alphas, sv_labels, self.bias);
             }
         } else {
             for i in 0..n {
-                let sample = x.row(i).to_owned();
+                let sample = x.row(i);
                 let mut best_score = f64::NEG_INFINITY;
                 for clf in &self.ovr_classifiers {
                     let score = self.score_sample(
-                        &sample,
+                        sample,
                         &clf.support_vectors,
                         &clf.alphas,
                         &clf.support_labels,
@@ -801,7 +802,7 @@ impl SVMRegressor {
             let mut k = Array2::zeros((n, n));
             for i in 0..n {
                 for j in i..n {
-                    let val = self.kernel(&x.row(i).to_owned(), &x.row(j).to_owned());
+                    let val = self.kernel(x.row(i), x.row(j));
                     k[[i, j]] = val;
                     k[[j, i]] = val;
                 }
@@ -809,20 +810,21 @@ impl SVMRegressor {
             return k;
         }
 
-        // Parallel: compute upper triangle rows in parallel
+        // Parallel: compute upper triangle rows in parallel. Reads rows
+        // directly as views instead of first copying every row into an
+        // owned `Vec<Vec<f64>>` and then cloning two of those per (i, j)
+        // pair (up to n^2/2 heap allocations) just to read their values —
+        // `x` (a shared reference to immutable data) and row views over it
+        // are both Send+Sync, so no intermediate copy is needed at all.
         let config = self.config.clone();
-        let x_data: Vec<Vec<f64>> = (0..n)
-            .map(|i| x.row(i).to_vec())
-            .collect();
 
         let rows: Vec<Vec<(usize, f64)>> = (0..n)
             .into_par_iter()
             .map(|i| {
-                let row_i = &x_data[i];
-                let a = Array1::from_vec(row_i.clone());
+                let a = x.row(i);
                 (i..n)
                     .map(|j| {
-                        let b = Array1::from_vec(x_data[j].clone());
+                        let b = x.row(j);
                         let val = match &config.kernel {
                             KernelType::Linear => a.dot(&b),
                             KernelType::Polynomial { degree, gamma, coef0 } => {
@@ -852,19 +854,19 @@ impl SVMRegressor {
         k
     }
 
-    fn kernel(&self, x1: &Array1<f64>, x2: &Array1<f64>) -> f64 {
+    fn kernel(&self, x1: ArrayView1<f64>, x2: ArrayView1<f64>) -> f64 {
         match &self.config.kernel {
-            KernelType::Linear => x1.dot(x2),
+            KernelType::Linear => x1.dot(&x2),
             KernelType::Polynomial { degree, gamma, coef0 } => {
-                (*gamma * x1.dot(x2) + coef0).powi((*degree).min(i32::MAX as usize) as i32)
+                (*gamma * x1.dot(&x2) + coef0).powi((*degree).min(i32::MAX as usize) as i32)
             }
             KernelType::RBF { gamma } => {
-                let diff = x1 - x2;
+                let diff = &x1 - &x2;
                 let norm_sq = diff.dot(&diff);
                 (-gamma * norm_sq).exp()
             }
             KernelType::Sigmoid { gamma, coef0 } => {
-                (*gamma * x1.dot(x2) + coef0).tanh()
+                (*gamma * x1.dot(&x2) + coef0).tanh()
             }
         }
     }
@@ -881,10 +883,10 @@ impl SVMRegressor {
         let n = x.nrows();
         
         let preds: Vec<f64> = (0..n).into_par_iter().map(|i| {
-            let sample = x.row(i).to_owned();
+            let sample = x.row(i);
             let mut sum = self.bias;
             for j in 0..sv.nrows() {
-                let k_val = self.kernel(&sample, &sv.row(j).to_owned());
+                let k_val = self.kernel(sample, sv.row(j));
                 sum += alphas[j] * k_val;
             }
             sum

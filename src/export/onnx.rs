@@ -397,35 +397,48 @@ impl ONNXExporter {
         })?;
         let mut writer = BufWriter::new(file);
 
+        // Build one contiguous byte buffer per initializer and issue a
+        // single `write_all` instead of one per value — each call previously
+        // paid its own function-call/bounds-check overhead independent of
+        // BufWriter's internal buffering, which adds up for models with
+        // millions of weights.
         for init in &graph.initializers {
             match &init.data {
                 InitializerData::Float(data) => {
+                    let mut buf = Vec::with_capacity(data.len() * 4);
                     for &val in data {
-                        writer.write_all(&val.to_le_bytes()).map_err(|e| {
-                            AutoMLError::DataError(format!("Failed to write: {}", e))
-                        })?;
+                        buf.extend_from_slice(&val.to_le_bytes());
                     }
+                    writer.write_all(&buf).map_err(|e| {
+                        AutoMLError::DataError(format!("Failed to write: {}", e))
+                    })?;
                 }
                 InitializerData::Double(data) => {
+                    let mut buf = Vec::with_capacity(data.len() * 8);
                     for &val in data {
-                        writer.write_all(&val.to_le_bytes()).map_err(|e| {
-                            AutoMLError::DataError(format!("Failed to write: {}", e))
-                        })?;
+                        buf.extend_from_slice(&val.to_le_bytes());
                     }
+                    writer.write_all(&buf).map_err(|e| {
+                        AutoMLError::DataError(format!("Failed to write: {}", e))
+                    })?;
                 }
                 InitializerData::Int32(data) => {
+                    let mut buf = Vec::with_capacity(data.len() * 4);
                     for &val in data {
-                        writer.write_all(&val.to_le_bytes()).map_err(|e| {
-                            AutoMLError::DataError(format!("Failed to write: {}", e))
-                        })?;
+                        buf.extend_from_slice(&val.to_le_bytes());
                     }
+                    writer.write_all(&buf).map_err(|e| {
+                        AutoMLError::DataError(format!("Failed to write: {}", e))
+                    })?;
                 }
                 InitializerData::Int64(data) => {
+                    let mut buf = Vec::with_capacity(data.len() * 8);
                     for &val in data {
-                        writer.write_all(&val.to_le_bytes()).map_err(|e| {
-                            AutoMLError::DataError(format!("Failed to write: {}", e))
-                        })?;
+                        buf.extend_from_slice(&val.to_le_bytes());
                     }
+                    writer.write_all(&buf).map_err(|e| {
+                        AutoMLError::DataError(format!("Failed to write: {}", e))
+                    })?;
                 }
             }
         }
