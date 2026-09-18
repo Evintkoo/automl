@@ -296,12 +296,16 @@ impl TrainEngine {
             })
             .collect::<Result<Vec<Vec<f64>>>>()?;
 
-        // Build flat row-major buffer with a single allocation
+        // Build flat row-major buffer with a single allocation. Bounds are
+        // guaranteed by construction (every column has exactly n_rows elements,
+        // per Series::cast/into_iter above), so skip the redundant per-element
+        // bounds check in this O(n_rows * n_cols) loop.
         let col_refs: Vec<&[f64]> = col_data.iter().map(|c| c.as_slice()).collect();
         let mut data = Vec::with_capacity(n_rows * n_cols);
         for r in 0..n_rows {
             for col in &col_refs {
-                data.push(col[r]);
+                debug_assert!(r < col.len());
+                data.push(unsafe { *col.get_unchecked(r) });
             }
         }
         Array2::from_shape_vec((n_rows, n_cols), data)
@@ -343,32 +347,39 @@ impl TrainEngine {
         let mut rng = ChaCha8Rng::seed_from_u64(self.config.random_seed.unwrap_or(42));
         perm.shuffle(&mut rng);
 
-        let x_shuffled = x.select(Axis(0), &perm);
-        let y_shuffled: Array1<f64> = Array1::from_vec(perm.iter().map(|&i| y[i]).collect());
+        // Write straight into train/val buffers in a single pass over `perm`,
+        // instead of materializing a fully shuffled copy of x/y first and then
+        // slicing it — that intermediate copy doubled the data movement for
+        // no benefit, since every row is read exactly once either way.
+        let mut x_train_data = Vec::with_capacity(train_size * n_cols);
+        let mut x_val_data = Vec::with_capacity(val_size * n_cols);
+        let mut y_train_data = Vec::with_capacity(train_size);
+        let mut y_val_data = Vec::with_capacity(val_size);
 
-        // Copy into contiguous arrays via pre-allocated flat buffers (avoids slice-to-owned overhead)
-        let x_raw = x_shuffled.as_slice().unwrap_or(&[]);
-        let is_contiguous = !x_raw.is_empty();
+        for (pos, &orig_idx) in perm.iter().enumerate() {
+            // `x` is always built by `columns_to_array2` as a standard
+            // (row-major) array, so each row is a contiguous slice — pull it
+            // out once and bulk-copy via `extend_from_slice` (memcpy) rather
+            // than looping through ndarray's per-element view iterator.
+            let row = x.row(orig_idx);
+            let row_slice = row
+                .as_slice()
+                .expect("x from columns_to_array2 is always row-major/contiguous");
+            if pos < train_size {
+                x_train_data.extend_from_slice(row_slice);
+                y_train_data.push(y[orig_idx]);
+            } else {
+                x_val_data.extend_from_slice(row_slice);
+                y_val_data.push(y[orig_idx]);
+            }
+        }
 
-        let (x_train, x_val) = if is_contiguous {
-            // Data is already contiguous row-major — fast memcpy splits
-            let train_data = x_raw[..train_size * n_cols].to_vec();
-            let val_data = x_raw[train_size * n_cols..].to_vec();
-            (
-                Array2::from_shape_vec((train_size, n_cols), train_data)
-                    .map_err(|e| AutoMLError::DataError(e.to_string()))?,
-                Array2::from_shape_vec((val_size, n_cols), val_data)
-                    .map_err(|e| AutoMLError::DataError(e.to_string()))?,
-            )
-        } else {
-            (
-                x_shuffled.slice(ndarray::s![..train_size, ..]).to_owned(),
-                x_shuffled.slice(ndarray::s![train_size.., ..]).to_owned(),
-            )
-        };
-
-        let y_train = y_shuffled.slice(ndarray::s![..train_size]).to_owned();
-        let y_val = y_shuffled.slice(ndarray::s![train_size..]).to_owned();
+        let x_train = Array2::from_shape_vec((train_size, n_cols), x_train_data)
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
+        let x_val = Array2::from_shape_vec((val_size, n_cols), x_val_data)
+            .map_err(|e| AutoMLError::DataError(e.to_string()))?;
+        let y_train = Array1::from_vec(y_train_data);
+        let y_val = Array1::from_vec(y_val_data);
 
         Ok((x_train, x_val, y_train, y_val))
     }

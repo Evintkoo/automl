@@ -15,15 +15,19 @@ fn cholesky_solve(a: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
     // Cholesky decomposition: A = L * L^T
     let mut l = Array2::zeros((n, n));
 
+    // All indices below are bounded by `n`, which matches `a`'s and `l`'s
+    // dimensions by construction, so the per-element bounds checks that
+    // `Index`/`IndexMut` would otherwise do on every access of this O(n^3)
+    // triple loop are redundant.
     for i in 0..n {
         for j in 0..=i {
             let mut sum = 0.0;
             for k in 0..j {
-                sum += l[[i, k]] * l[[j, k]];
+                sum += unsafe { l.uget((i, k)) * l.uget((j, k)) };
             }
 
             if i == j {
-                let diag = a[[i, i]] - sum;
+                let diag = unsafe { *a.uget((i, i)) } - sum;
                 if diag <= 0.0 {
                     // Not positive definite — add regularization and retry
                     let mut a_reg = a.clone();
@@ -33,9 +37,10 @@ fn cholesky_solve(a: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
                     }
                     return cholesky_solve_inner(&a_reg, b);
                 }
-                l[[i, j]] = diag.sqrt();
+                unsafe { *l.uget_mut((i, j)) = diag.sqrt() };
             } else {
-                l[[i, j]] = (a[[i, j]] - sum) / l[[j, j]];
+                let val = (unsafe { *a.uget((i, j)) } - sum) / unsafe { *l.uget((j, j)) };
+                unsafe { *l.uget_mut((i, j)) = val };
             }
         }
     }
@@ -45,9 +50,10 @@ fn cholesky_solve(a: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
     for i in 0..n {
         let mut sum = 0.0;
         for j in 0..i {
-            sum += l[[i, j]] * y[j];
+            sum += unsafe { l.uget((i, j)) * y.uget(j) };
         }
-        y[i] = (b[i] - sum) / l[[i, i]];
+        let val = (unsafe { *b.uget(i) } - sum) / unsafe { *l.uget((i, i)) };
+        unsafe { *y.uget_mut(i) = val };
     }
 
     // Backward substitution: L^T * x = y
@@ -55,9 +61,10 @@ fn cholesky_solve(a: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
     for i in (0..n).rev() {
         let mut sum = 0.0;
         for j in (i + 1)..n {
-            sum += l[[j, i]] * x[j];
+            sum += unsafe { l.uget((j, i)) * x.uget(j) };
         }
-        x[i] = (y[i] - sum) / l[[i, i]];
+        let val = (unsafe { *y.uget(i) } - sum) / unsafe { *l.uget((i, i)) };
+        unsafe { *x.uget_mut(i) = val };
     }
 
     Some(x)
@@ -72,16 +79,17 @@ fn cholesky_solve_inner(a: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>>
         for j in 0..=i {
             let mut sum = 0.0;
             for k in 0..j {
-                sum += l[[i, k]] * l[[j, k]];
+                sum += unsafe { l.uget((i, k)) * l.uget((j, k)) };
             }
             if i == j {
-                let diag = a[[i, i]] - sum;
+                let diag = unsafe { *a.uget((i, i)) } - sum;
                 if diag <= 0.0 {
                     return None; // Still not PD even with regularization — fall back to Gauss-Jordan
                 }
-                l[[i, j]] = diag.sqrt();
+                unsafe { *l.uget_mut((i, j)) = diag.sqrt() };
             } else {
-                l[[i, j]] = (a[[i, j]] - sum) / l[[j, j]];
+                let val = (unsafe { *a.uget((i, j)) } - sum) / unsafe { *l.uget((j, j)) };
+                unsafe { *l.uget_mut((i, j)) = val };
             }
         }
     }
@@ -90,18 +98,20 @@ fn cholesky_solve_inner(a: &Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>>
     for i in 0..n {
         let mut sum = 0.0;
         for j in 0..i {
-            sum += l[[i, j]] * y[j];
+            sum += unsafe { l.uget((i, j)) * y.uget(j) };
         }
-        y[i] = (b[i] - sum) / l[[i, i]];
+        let val = (unsafe { *b.uget(i) } - sum) / unsafe { *l.uget((i, i)) };
+        unsafe { *y.uget_mut(i) = val };
     }
 
     let mut x = Array1::zeros(n);
     for i in (0..n).rev() {
         let mut sum = 0.0;
         for j in (i + 1)..n {
-            sum += l[[j, i]] * x[j];
+            sum += unsafe { l.uget((j, i)) * x.uget(j) };
         }
-        x[i] = (y[i] - sum) / l[[i, i]];
+        let val = (unsafe { *y.uget(i) } - sum) / unsafe { *l.uget((i, i)) };
+        unsafe { *x.uget_mut(i) = val };
     }
 
     Some(x)

@@ -211,25 +211,41 @@ impl Scaler {
                 })
             }
             ScalerType::Robust => {
-                // Single sort for Q1/Q3: uses nearest-rank (vals[n/4], vals[3n/4])
-                // instead of Polars QuantileMethod::Linear — small numeric difference
-                // on datasets with n < ~20, negligible otherwise.
+                // Order statistics for Q1/median/Q3: uses nearest-rank (vals[n/4],
+                // vals[3n/4]) instead of Polars QuantileMethod::Linear — small
+                // numeric difference on datasets with n < ~20, negligible otherwise.
                 // `into_no_null_iter` only skips Polars null, not float NaN, so
-                // NaN must be filtered explicitly to avoid poisoning the sort
+                // NaN must be filtered explicitly to avoid poisoning the selection
                 // (and therefore the median/IQR) below.
                 let mut vals: Vec<f64> = ca.into_no_null_iter().filter(|v| !v.is_nan()).collect();
                 if vals.is_empty() {
                     return Ok(ScalerParams { center: 0.0, scale: 1.0 });
                 }
-                vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                 let n = vals.len();
+                let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
+
+                // Three independent quickselects (each O(n) average) instead of one
+                // full O(n log n) sort — we only ever read 2-3 order-statistic slots.
+                let mid = n / 2;
+                vals.select_nth_unstable_by(mid, cmp);
+                let upper_median = vals[mid];
                 let median = if n % 2 == 0 {
-                    (vals[n / 2 - 1] + vals[n / 2]) / 2.0
+                    let lower_median = vals[..mid]
+                        .iter()
+                        .copied()
+                        .fold(f64::NEG_INFINITY, f64::max);
+                    (lower_median + upper_median) / 2.0
                 } else {
-                    vals[n / 2]
+                    upper_median
                 };
-                let q1 = vals[n / 4];
-                let q3 = vals[3 * n / 4];
+
+                let q1_idx = n / 4;
+                vals.select_nth_unstable_by(q1_idx, cmp);
+                let q1 = vals[q1_idx];
+
+                let q3_idx = 3 * n / 4;
+                vals.select_nth_unstable_by(q3_idx, cmp);
+                let q3 = vals[q3_idx];
                 let iqr = q3 - q1;
                 Ok(ScalerParams {
                     center: median,
