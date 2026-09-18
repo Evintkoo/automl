@@ -387,9 +387,13 @@ enum KDNode {
     },
 }
 
-/// KD-tree for spatial indexing
+/// KD-tree for spatial indexing.
+///
+/// `pub(crate)` so other modules with the same "find nearby points fast"
+/// problem (e.g. DBSCAN in `clustering.rs`) can reuse this index instead of
+/// falling back to an O(n) brute-force scan per query.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct KDTree {
+pub(crate) struct KDTree {
     root: KDNode,
     n_dims: usize,
 }
@@ -417,7 +421,7 @@ const KD_LEAF_SIZE: usize = 16;
 
 impl KDTree {
     /// Build a KD-tree from a dataset
-    fn build(data: &Array2<f64>) -> Self {
+    pub(crate) fn build(data: &Array2<f64>) -> Self {
         let n_dims = data.ncols();
         let indices: Vec<usize> = (0..data.nrows()).collect();
         let root = Self::build_node(data, indices, 0, n_dims);
@@ -451,7 +455,7 @@ impl KDTree {
     }
 
     /// Query k nearest neighbors, returns Vec<(distance, index)>
-    fn query_k_nearest(
+    pub(crate) fn query_k_nearest(
         &self,
         point: &[f64],
         data: &Array2<f64>,
@@ -461,6 +465,63 @@ impl KDTree {
         let mut heap = BinaryHeap::with_capacity(k + 1);
         self.search_node(&self.root, point, data, k, metric, &mut heap);
         heap.into_iter().map(|e| (e.dist, e.idx)).collect()
+    }
+
+    /// Query all point indices within `eps` distance of `point` (inclusive).
+    /// This is the range-query counterpart to `query_k_nearest`: instead of
+    /// keeping the k closest candidates in a heap, it prunes any subtree
+    /// whose splitting plane is farther than `eps` away, so a query costs
+    /// roughly O(log n + m) (m = number of points returned) rather than the
+    /// O(n) brute-force distance scan a naive "for every point, check
+    /// distance" loop would need.
+    pub(crate) fn query_radius(
+        &self,
+        point: &[f64],
+        data: &Array2<f64>,
+        eps: f64,
+        metric: DistanceMetric,
+    ) -> Vec<usize> {
+        let mut out = Vec::new();
+        self.search_radius(&self.root, point, data, eps, metric, &mut out);
+        out
+    }
+
+    fn search_radius(
+        &self,
+        node: &KDNode,
+        point: &[f64],
+        data: &Array2<f64>,
+        eps: f64,
+        metric: DistanceMetric,
+        out: &mut Vec<usize>,
+    ) {
+        match node {
+            KDNode::Leaf { indices } => {
+                for &idx in indices {
+                    let dist = compute_distance(point, data.row(idx).as_slice().unwrap(), metric);
+                    if dist <= eps {
+                        out.push(idx);
+                    }
+                }
+            }
+            KDNode::Split { dimension, threshold, left, right } => {
+                let diff = point[*dimension] - threshold;
+
+                // The side containing the query point must always be visited.
+                let (near, far) = if diff <= 0.0 {
+                    (left.as_ref(), right.as_ref())
+                } else {
+                    (right.as_ref(), left.as_ref())
+                };
+                self.search_radius(near, point, data, eps, metric, out);
+
+                // The far side can only contain points within `eps` if the
+                // splitting plane itself is within `eps` of the query point.
+                if diff.abs() <= eps {
+                    self.search_radius(far, point, data, eps, metric, out);
+                }
+            }
+        }
     }
 
     fn search_node(

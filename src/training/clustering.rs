@@ -10,6 +10,7 @@ use rand::RngCore;
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use super::knn::{DistanceMetric, KDTree};
 
 // ═══════════════════════════════════════════════════════════════════════════
 //  K-Means Clustering
@@ -321,28 +322,28 @@ impl DBSCAN {
         self
     }
 
-    fn euclidean_dist(a: &ndarray::ArrayView1<f64>, b: &ndarray::ArrayView1<f64>) -> f64 {
-        a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt()
-    }
-
-    /// Find all neighbors within eps distance
-    fn region_query(x: &Array2<f64>, point_idx: usize, eps: f64) -> Vec<usize> {
-        let row = x.row(point_idx);
-        (0..x.nrows())
-            .filter(|&i| Self::euclidean_dist(&row, &x.row(i)) <= eps)
-            .collect()
-    }
-
     /// Fit the model (unsupervised)
     pub fn fit(&mut self, x: &Array2<f64>) -> Result<&mut Self> {
         let n_samples = x.nrows();
         let eps = self.eps;
         let min_samples = self.min_samples;
 
-        // Pre-compute neighbor lists for all points (parallelized)
+        // Build a KD-tree once and reuse it for every point's neighbor query.
+        // The previous approach (`region_query`) computed the distance from
+        // every point to every other point — O(n^2) total — which dominates
+        // wall-clock time well before n reaches six figures. A range query
+        // against the tree prunes subtrees whose splitting plane is farther
+        // than `eps` away, turning this into O(n log n) on average.
+        let tree = KDTree::build(x);
         let neighbors: Vec<Vec<usize>> = (0..n_samples)
             .into_par_iter()
-            .map(|i| Self::region_query(x, i, eps))
+            .map(|i| {
+                let row = x.row(i);
+                // Rows of a standard (row-major) Array2 are always contiguous,
+                // which every caller in this crate provides (see `columns_to_array2`).
+                let row_slice = row.as_slice().expect("x rows must be contiguous");
+                tree.query_radius(row_slice, x, eps, DistanceMetric::Euclidean)
+            })
             .collect();
 
         // Identify core points
@@ -394,31 +395,160 @@ impl DBSCAN {
         Ok(self)
     }
 
-    /// Predict cluster labels for new data by nearest core-point assignment
+    /// Predict cluster labels for new data by nearest-point assignment
+    /// (uses that point's own label — cluster or noise — same as `fit`).
     pub fn predict(&self, x: &Array2<f64>) -> Result<Array1<f64>> {
         let train_x = self.train_x.as_ref()
             .ok_or(AutoMLError::ModelNotFitted)?;
         let train_labels = self.labels.as_ref()
             .ok_or(AutoMLError::ModelNotFitted)?;
 
+        // Nearest-neighbor lookup via KD-tree instead of an O(n_train) brute
+        // force scan per query row — same result (the eps-constrained nearest
+        // training point), O(log n_train) average cost instead.
+        let tree = KDTree::build(train_x);
+        let eps = self.eps;
+
         let labels: Vec<f64> = (0..x.nrows())
             .into_par_iter()
+            .map(|i| {
+                let row = x.row(i);
+                let row_slice = row.as_slice().expect("x rows must be contiguous");
+                tree.query_k_nearest(row_slice, train_x, 1, DistanceMetric::Euclidean)
+                    .into_iter()
+                    .find(|&(dist, _)| dist <= eps)
+                    .map(|(_, idx)| train_labels[idx])
+                    .unwrap_or(-1.0)
+            })
+            .collect();
+
+        Ok(Array1::from_vec(labels))
+    }
+}
+
+#[cfg(test)]
+mod dbscan_differential {
+    // Temporary differential check: verifies the KD-tree-backed neighbor
+    // search in DBSCAN::fit/predict produces byte-identical cluster labels
+    // to the original O(n^2) brute-force scan, despite returning neighbor
+    // lists in a different (tree-traversal, not ascending-index) order.
+    use super::*;
+
+    fn ref_euclidean_dist(a: &ndarray::ArrayView1<f64>, b: &ndarray::ArrayView1<f64>) -> f64 {
+        a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt()
+    }
+
+    fn ref_region_query(x: &Array2<f64>, point_idx: usize, eps: f64) -> Vec<usize> {
+        let row = x.row(point_idx);
+        (0..x.nrows())
+            .filter(|&i| ref_euclidean_dist(&row, &x.row(i)) <= eps)
+            .collect()
+    }
+
+    fn reference_fit(x: &Array2<f64>, eps: f64, min_samples: usize) -> Vec<i64> {
+        let n_samples = x.nrows();
+        let neighbors: Vec<Vec<usize>> = (0..n_samples).map(|i| ref_region_query(x, i, eps)).collect();
+        let is_core: Vec<bool> = neighbors.iter().map(|n| n.len() >= min_samples).collect();
+
+        let mut labels = vec![-1i64; n_samples];
+        let mut cluster_id: i64 = 0;
+
+        for i in 0..n_samples {
+            if labels[i] != -1 || !is_core[i] {
+                continue;
+            }
+            labels[i] = cluster_id;
+            let mut queue: Vec<usize> = neighbors[i].clone();
+            let mut head = 0;
+            while head < queue.len() {
+                let q = queue[head];
+                head += 1;
+                if labels[q] == -1 {
+                    labels[q] = cluster_id;
+                }
+                if !is_core[q] {
+                    continue;
+                }
+                for &neighbor in &neighbors[q] {
+                    if labels[neighbor] == -1 {
+                        labels[neighbor] = cluster_id;
+                        queue.push(neighbor);
+                    }
+                }
+            }
+            cluster_id += 1;
+        }
+        labels
+    }
+
+    fn reference_predict(train_x: &Array2<f64>, train_labels: &[f64], x: &Array2<f64>, eps: f64) -> Vec<f64> {
+        (0..x.nrows())
             .map(|i| {
                 let row = x.row(i);
                 let mut best_label = -1.0;
                 let mut best_dist = f64::MAX;
                 for j in 0..train_x.nrows() {
-                    let d = Self::euclidean_dist(&row, &train_x.row(j));
-                    if d < best_dist && d <= self.eps {
+                    let d = ref_euclidean_dist(&row, &train_x.row(j));
+                    if d < best_dist && d <= eps {
                         best_dist = d;
                         best_label = train_labels[j];
                     }
                 }
                 best_label
             })
-            .collect();
+            .collect()
+    }
 
-        Ok(Array1::from_vec(labels))
+    fn make_stress_data(n: usize, seed: u64) -> Array2<f64> {
+        // Several tight, closely-spaced blobs (some touching at their eps
+        // boundary) plus a chunk of points snapped to a coarse grid, to
+        // maximize the chance of exact/near-exact equidistant ties between
+        // clusters and force real border-point contention.
+        let mut state = seed;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state as f64 / u64::MAX as f64) - 0.5
+        };
+
+        let centers = [(0.0, 0.0), (1.0, 0.0), (0.5, 0.9), (5.0, 5.0)];
+        let mut data = Vec::with_capacity(n * 2);
+        for k in 0..n {
+            if k % 4 == 0 {
+                // Grid-snapped points to force exact distance ties
+                let gx = (k / 4 % 5) as f64 * 0.5;
+                let gy = (k / 4 / 5 % 5) as f64 * 0.5;
+                data.push(gx);
+                data.push(gy);
+            } else {
+                let (cx, cy) = centers[k % centers.len()];
+                data.push(cx + next() * 0.6);
+                data.push(cy + next() * 0.6);
+            }
+        }
+        Array2::from_shape_vec((n, 2), data).unwrap()
+    }
+
+    #[test]
+    fn optimized_matches_reference_fit_and_predict() {
+        for &(eps, min_samples) in &[(0.5, 3usize), (0.8, 5), (1.0, 4)] {
+            let x = make_stress_data(150, 0xdead_beef_1234_5678);
+            let ref_labels = reference_fit(&x, eps, min_samples);
+
+            let mut model = DBSCAN::new(eps, min_samples);
+            model.fit(&x).unwrap();
+            let got_labels: Vec<i64> = model.labels.as_ref().unwrap().iter().map(|&v| v as i64).collect();
+
+            assert_eq!(got_labels, ref_labels, "fit() labels mismatch at eps={eps}, min_samples={min_samples}");
+
+            // Predict on a fresh (unseen) batch, including points that
+            // coincide with training points to stress exact-distance ties.
+            let test_x = make_stress_data(60, 0x0bad_c0de_dead_beef);
+            let ref_pred = reference_predict(&x, &ref_labels.iter().map(|&l| l as f64).collect::<Vec<_>>(), &test_x, eps);
+            let got_pred = model.predict(&test_x).unwrap().to_vec();
+            assert_eq!(got_pred, ref_pred, "predict() labels mismatch at eps={eps}, min_samples={min_samples}");
+        }
     }
 }
 

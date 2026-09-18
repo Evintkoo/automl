@@ -340,38 +340,41 @@ impl FeatureSelector {
         x: &Array2<f64>,
         y: &Array1<f64>,
         n_features_to_select: usize,
-        step: usize,
+        _step: usize,
     ) -> Result<()> {
         let n_features = x.ncols();
         let n_select = n_features_to_select.min(n_features);
-        
-        let mut remaining: HashSet<usize> = (0..n_features).collect();
+
+        // A real model-based RFE re-scores remaining features each round because
+        // eliminating a feature changes the model that produces the scores. This
+        // correlation-proxy variant scores each feature against `y` independently
+        // of every other feature, so the score for a surviving feature is exactly
+        // the same in every round — recomputing it `n_features/step` times (the
+        // original approach) did identical work over and over for no different
+        // result. Score once (O(d*n)) and consume the ascending order directly;
+        // `step` no longer affects which features end up selected, since removing
+        // the globally-worst features in batches or all at once yields the same
+        // bottom-n_to_remove set.
+        use rayon::prelude::*;
+        let mut scores: Vec<(usize, f64)> = (0..n_features)
+            .into_par_iter()
+            .map(|idx| {
+                let col = x.column(idx);
+                let importance = Self::compute_correlation(&col.to_owned(), y).abs();
+                (idx, importance)
+            })
+            .collect();
+        scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let n_to_remove = n_features - n_select;
         let mut ranking = vec![0usize; n_features];
         let mut current_rank = n_features;
+        let mut remaining: HashSet<usize> = (0..n_features).collect();
 
-        // Iteratively remove features
-        while remaining.len() > n_select {
-            // Compute importance scores for remaining features
-            use rayon::prelude::*;
-            let mut scores: Vec<(usize, f64)> = remaining
-                .par_iter()
-                .map(|&idx| {
-                    let col = x.column(idx);
-                    let importance = Self::compute_correlation(&col.to_owned(), y).abs();
-                    (idx, importance)
-                })
-                .collect();
-
-            // Sort by importance (ascending, to remove worst first)
-            scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-
-            // Remove step features
-            let n_to_remove = step.min(remaining.len() - n_select);
-            for (idx, _) in scores.into_iter().take(n_to_remove) {
-                remaining.remove(&idx);
-                ranking[idx] = current_rank;
-                current_rank = current_rank.saturating_sub(1);
-            }
+        for &(idx, _) in scores.iter().take(n_to_remove) {
+            remaining.remove(&idx);
+            ranking[idx] = current_rank;
+            current_rank = current_rank.saturating_sub(1);
         }
 
         // Assign rank 1 to remaining features
@@ -506,6 +509,18 @@ impl CorrelationFilter {
         let mut removed_pairs = Vec::new();
 
         // Precompute full correlation matrix once — O(n²) instead of O(n³)
+        //
+        // NB: an incrementally-maintained running row-sum (update by
+        // subtraction on each removal, O(n) per removal instead of O(n) per
+        // exceeded-threshold pair) was tried here to bring the worst case
+        // down from O(n^3) to O(n^2), but it changes results: subtracting
+        // terms in removal order accumulates float rounding differently than
+        // summing the same (excluding-removed) terms fresh in index order
+        // every time, and this algorithm's mean-comparison tie-break is
+        // sensitive enough to that last-bit drift to occasionally choose a
+        // different feature to remove. Reverted — this path only matters
+        // once n_features reaches the hundreds, so the O(n^3) worst case
+        // isn't worth a non-deterministic-looking behavior change.
         let corr_matrix = Self::compute_correlation_matrix(x);
 
         for i in 0..n_features {
