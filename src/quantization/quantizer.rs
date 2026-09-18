@@ -158,6 +158,16 @@ pub struct Quantizer {
     // Calibration state
     is_calibrated: bool,
     calibration_data: Vec<f64>,
+    /// Running min/max across every batch passed to `calibrate`, updated
+    /// incrementally so the common (non-percentile) calibration path doesn't
+    /// need to retain and re-scan every raw sample ever seen — see
+    /// `calibrate`.
+    running_min: f64,
+    running_max: f64,
+    /// Whether any sample has ever been passed to `calibrate` (across all
+    /// batches) — used in place of checking `calibration_data.is_empty()`
+    /// now that the non-percentile path doesn't populate `calibration_data`.
+    has_calibration_samples: bool,
     
     // Statistics
     quantize_calls: AtomicU64,
@@ -191,6 +201,9 @@ impl Quantizer {
             qmax,
             is_calibrated: false,
             calibration_data: Vec::new(),
+            running_min: f64::INFINITY,
+            running_max: f64::NEG_INFINITY,
+            has_calibration_samples: false,
             quantize_calls: AtomicU64::new(0),
             dequantize_calls: AtomicU64::new(0),
             clipped_values: AtomicU64::new(0),
@@ -227,14 +240,39 @@ impl Quantizer {
     
     /// Calibrate the quantizer with sample data
     pub fn calibrate(&mut self, data: &[f64]) {
-        self.calibration_data.extend_from_slice(data);
-        
-        if self.calibration_data.is_empty() {
-            return;
+        if !data.is_empty() {
+            self.has_calibration_samples = true;
         }
-        
-        let (min_val, max_val) = self.compute_range(&self.calibration_data);
-        
+
+        let (min_val, max_val) = if self.config.clip_percentile.is_some() {
+            // Percentile-based clipping needs an exact order statistic over
+            // every sample ever seen, which means keeping the full history —
+            // there's no way to maintain that incrementally without either
+            // retaining the raw data (as here) or trading exactness for an
+            // approximate/streaming percentile estimator. Unlike the
+            // min/max path below, this really does need the full rescan.
+            self.calibration_data.extend_from_slice(data);
+            if !self.has_calibration_samples {
+                return;
+            }
+            self.compute_range(&self.calibration_data)
+        } else {
+            // Min/max is all `compute_range` computes on this path, and that
+            // can be tracked incrementally in O(batch) per call instead of
+            // appending every sample to an ever-growing buffer and folding
+            // over the *entire* accumulated history from scratch every time
+            // (previously O(total samples seen so far) per call, O(n^2)
+            // total across n calibration batches).
+            for &v in data {
+                if v < self.running_min { self.running_min = v; }
+                if v > self.running_max { self.running_max = v; }
+            }
+            if !self.has_calibration_samples {
+                return;
+            }
+            (self.running_min, self.running_max)
+        };
+
         // Compute scale and zero point
         match self.config.quantization_mode {
             QuantizationMode::Symmetric => {
@@ -253,7 +291,7 @@ impl Quantizer {
                 self.global_zero_point = 0.0;
             }
         }
-        
+
         self.is_calibrated = true;
     }
     
@@ -376,6 +414,9 @@ impl Quantizer {
     pub fn reset(&mut self) {
         self.is_calibrated = false;
         self.calibration_data.clear();
+        self.running_min = f64::INFINITY;
+        self.running_max = f64::NEG_INFINITY;
+        self.has_calibration_samples = false;
         self.global_scale = 1.0;
         self.global_zero_point = 0.0;
         self.per_channel_scales.clear();

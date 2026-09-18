@@ -3,6 +3,7 @@
 use crate::error::Result;
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Metrics for model evaluation
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,25 +133,35 @@ impl ModelMetrics {
             return (0.0, 0.0);
         }
 
-        let mut precisions = Vec::with_capacity(classes.len());
-        let mut recalls = Vec::with_capacity(classes.len());
+        // Build the full k*k confusion matrix in a single O(n) pass, instead
+        // of one O(n) pass per class (O(n*k) total) to derive each class's
+        // one-vs-rest tp/fp/fn independently. Per-class counts then come
+        // from that class's row/column sums (O(k) each, O(k^2) total —
+        // negligible next to the O(n) pass itself for realistic class
+        // counts).
+        let k = classes.len();
+        let class_to_idx: HashMap<i64, usize> =
+            classes.iter().enumerate().map(|(i, &c)| (c, i)).collect();
 
-        for &c in classes {
-            let mut tp = 0usize;
-            let mut fp = 0usize;
-            let mut fn_ = 0usize;
-
-            for (t, p) in y_true.iter().zip(y_pred.iter()) {
-                let t_is_c = t.round() as i64 == c;
-                let p_is_c = p.round() as i64 == c;
-
-                match (t_is_c, p_is_c) {
-                    (true, true) => tp += 1,
-                    (false, true) => fp += 1,
-                    (true, false) => fn_ += 1,
-                    (false, false) => {}
-                }
+        let mut confusion = vec![0usize; k * k];
+        for (t, p) in y_true.iter().zip(y_pred.iter()) {
+            if let (Some(&ti), Some(&pi)) = (
+                class_to_idx.get(&(t.round() as i64)),
+                class_to_idx.get(&(p.round() as i64)),
+            ) {
+                confusion[ti * k + pi] += 1;
             }
+        }
+
+        let mut precisions = Vec::with_capacity(k);
+        let mut recalls = Vec::with_capacity(k);
+
+        for i in 0..k {
+            let tp = confusion[i * k + i];
+            let row_sum: usize = (0..k).map(|j| confusion[i * k + j]).sum(); // tp + fn_
+            let col_sum: usize = (0..k).map(|ti| confusion[ti * k + i]).sum(); // tp + fp
+            let fp = col_sum - tp;
+            let fn_ = row_sum - tp;
 
             precisions.push(if tp + fp > 0 {
                 tp as f64 / (tp + fp) as f64
@@ -164,7 +175,7 @@ impl ModelMetrics {
             });
         }
 
-        let n = classes.len() as f64;
+        let n = k as f64;
         (
             precisions.iter().sum::<f64>() / n,
             recalls.iter().sum::<f64>() / n,

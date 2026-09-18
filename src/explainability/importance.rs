@@ -138,10 +138,13 @@ where
         // Compute importance for each feature
         let mut importances_raw: Vec<Vec<f64>> = vec![Vec::new(); n_features];
 
+        // Reuse one buffer across every (repeat, feature) permutation instead
+        // of cloning the full matrix n_repeats * n_features times: permute
+        // one column in place, score, then restore that column's original
+        // values before moving on to the next feature/repeat.
+        let mut x_permuted = x.clone();
         for _ in 0..self.n_repeats {
             for feature_idx in 0..n_features {
-                // Create permuted data
-                let mut x_permuted = x.clone();
                 let mut col: Vec<f64> = x.column(feature_idx).iter().copied().collect();
                 col.shuffle(&mut rng);
 
@@ -156,6 +159,11 @@ where
                 // Importance = how much worse the model gets
                 let importance = permuted_score - baseline_score;
                 importances_raw[feature_idx].push(importance);
+
+                // Restore the original column before permuting the next one.
+                for (i, &val) in x.column(feature_idx).iter().enumerate() {
+                    x_permuted[[i, feature_idx]] = val;
+                }
             }
         }
 

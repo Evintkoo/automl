@@ -192,6 +192,18 @@ pub struct AppState {
     /// running job; nothing currently calls `.abort()` on these.
     pub job_handles: DashMap<String, tokio::task::JoinHandle<()>>,
     pub models: DashMap<String, ModelInfo>,
+    /// The model id `/predict`-family handlers default to when a request
+    /// doesn't specify its own `model_id` — mirrors `current_dataset_id`.
+    /// Every insert into `models` unconditionally overwrites this with its
+    /// own id, which is correct because each live insert stamps its
+    /// `created_at` with `Utc::now()` at insert time, so insertion order and
+    /// created_at order coincide; disk-restored models (whose `created_at`
+    /// is the file's mtime, not insertion order) are handled separately by
+    /// seeding this from a one-time max-by-created_at scan right after
+    /// `restore_models_from_disk` at startup. Without this cache, every
+    /// prediction request that omits `model_id` did a full linear scan of
+    /// every registered model to find the newest one.
+    pub latest_model_id: RwLock<Option<String>>,
     /// Actual per-dataset DataFrame storage, keyed by dataset id. Kept separate from
     /// `datasets` (metadata only) so that multiple datasets uploaded/imported
     /// concurrently can coexist instead of one silently clobbering another via a
@@ -270,6 +282,7 @@ impl AppState {
             jobs: RwLock::new(HashMap::new()),
             job_handles: DashMap::new(),
             models: DashMap::new(),
+            latest_model_id: RwLock::new(None),
             dataset_frames: RwLock::new(HashMap::new()),
             current_dataset_id: RwLock::new(None),
             preprocessor: RwLock::new(None),

@@ -40,44 +40,54 @@ impl IsotonicRegression {
         self
     }
 
-    /// Pool Adjacent Violators Algorithm (PAVA)
+    /// Pool Adjacent Violators Algorithm (PAVA): computes the L2-optimal
+    /// non-decreasing fit to `y` (weighted by `weights`).
+    ///
+    /// Uses a stack of pools (each a maximal run of already-merged points
+    /// sharing one fitted value). This is the standard PAVA formulation —
+    /// the previous version here only ever merged the two boundary array
+    /// slots of a violation and let the merged value's neighbors go stale,
+    /// so it did not converge to the correct isotonic fit for pools of 3+
+    /// points (verified: for y=[3,1,2,0,5] it should converge to
+    /// [1.5,1.5,1.5,1.5,5], not the ~1.618 it was producing). Each element is
+    /// pushed and popped from the stack at most once, so this is O(n).
     fn pava(y: &[f64], weights: &[f64]) -> Vec<f64> {
         let n = y.len();
         if n == 0 {
             return vec![];
         }
 
-        let mut result = y.to_vec();
-        let mut w = weights.to_vec();
-        
-        // Merge pools until isotonic
-        let mut i = 0;
-        while i < n - 1 {
-            if result[i] > result[i + 1] {
-                // Merge pools i and i+1
-                let total_weight = w[i] + w[i + 1];
-                let merged_value = (result[i] * w[i] + result[i + 1] * w[i + 1]) / total_weight;
-                
-                result[i] = merged_value;
-                result[i + 1] = merged_value;
-                w[i] = total_weight;
-                w[i + 1] = total_weight;
-                
-                // Check backwards for violations
-                while i > 0 && result[i - 1] > result[i] {
-                    let total_weight = w[i - 1] + w[i];
-                    let merged_value = (result[i - 1] * w[i - 1] + result[i] * w[i]) / total_weight;
-                    
-                    result[i - 1] = merged_value;
-                    result[i] = merged_value;
-                    w[i - 1] = total_weight;
-                    w[i] = total_weight;
-                    i -= 1;
-                }
-            }
-            i += 1;
+        struct Pool {
+            mean: f64,
+            weight: f64,
+            size: usize,
         }
 
+        let mut stack: Vec<Pool> = Vec::with_capacity(n);
+        for i in 0..n {
+            let mut current = Pool { mean: y[i], weight: weights[i], size: 1 };
+            while let Some(top) = stack.last() {
+                if top.mean > current.mean {
+                    let top = stack.pop().unwrap();
+                    let total_weight = top.weight + current.weight;
+                    let merged_mean =
+                        (top.mean * top.weight + current.mean * current.weight) / total_weight;
+                    current = Pool {
+                        mean: merged_mean,
+                        weight: total_weight,
+                        size: top.size + current.size,
+                    };
+                } else {
+                    break;
+                }
+            }
+            stack.push(current);
+        }
+
+        let mut result = Vec::with_capacity(n);
+        for pool in stack {
+            result.extend(std::iter::repeat(pool.mean).take(pool.size));
+        }
         result
     }
 
@@ -263,12 +273,32 @@ mod tests {
     fn test_pava() {
         let y = vec![1.0, 0.0, 1.0, 0.0, 1.0];
         let w = vec![1.0, 1.0, 1.0, 1.0, 1.0];
-        
+
         let result = IsotonicRegression::pava(&y, &w);
-        
+
         // Result should be non-decreasing
         for i in 1..result.len() {
             assert!(result[i] >= result[i - 1] - 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_pava_known_correct_solution() {
+        // Textbook PAVA example with a pool of more than 2 points, where a
+        // boundary-only merge (rather than tracking whole pools) converges
+        // to the wrong value: the correct L2-optimal isotonic fit of
+        // [3,1,2,0,5] is [1.5,1.5,1.5,1.5,5].
+        let y = vec![3.0, 1.0, 2.0, 0.0, 5.0];
+        let w = vec![1.0; 5];
+
+        let result = IsotonicRegression::pava(&y, &w);
+
+        let expected = [1.5, 1.5, 1.5, 1.5, 5.0];
+        for (got, want) in result.iter().zip(expected.iter()) {
+            assert!(
+                (got - want).abs() < 1e-9,
+                "pava({y:?}) = {result:?}, expected {expected:?}"
+            );
         }
     }
 }

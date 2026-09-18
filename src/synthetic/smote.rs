@@ -276,17 +276,16 @@ impl BorderlineSMOTE {
         self
     }
 
-    /// Check if a point is borderline
-    fn is_borderline(&self, point_idx: usize, x: &Array2<f64>, y: &Array1<i64>) -> bool {
-        let point: Vec<f64> = x.row(point_idx).iter().copied().collect();
+    /// Check if a point is borderline. `all_samples` is the whole dataset,
+    /// precomputed once by the caller — this used to be rebuilt (a full copy
+    /// of every row) on every single call, even though it's called once per
+    /// minority-class sample, making dataset-copying alone O(minority_count *
+    /// n * n_features).
+    fn is_borderline(&self, point_idx: usize, all_samples: &[Vec<f64>], y: &Array1<i64>) -> bool {
+        let point = &all_samples[point_idx];
         let point_class = y[point_idx];
 
         // Find m nearest neighbors (including other classes)
-        let all_samples: Vec<Vec<f64>> = x.rows()
-            .into_iter()
-            .map(|row| row.iter().copied().collect())
-            .collect();
-
         let mut distances: Vec<(usize, f64)> = all_samples.iter()
             .enumerate()
             .filter(|&(i, _)| i != point_idx)
@@ -369,22 +368,26 @@ impl Sampler for BorderlineSMOTE {
             .map(|(&k, _)| k)
             .collect();
 
+        // Collect original samples once, up front — this doubles as the
+        // dataset snapshot `is_borderline` needs below (previously it rebuilt
+        // this same full copy on every single call, once per minority-class
+        // sample) and as the base buffer synthetic samples get appended to.
+        let mut all_x: Vec<Vec<f64>> = x.rows()
+            .into_iter()
+            .map(|row| row.iter().copied().collect())
+            .collect();
+
         // Find borderline samples for minority classes
         let mut borderline_indices: HashMap<i64, Vec<usize>> = HashMap::new();
         for &class in &minority_classes {
             let class_idx = indices.get(&class).unwrap();
             let borderline: Vec<usize> = class_idx.iter()
-                .filter(|&&i| self.is_borderline(i, x, y))
+                .filter(|&&i| self.is_borderline(i, &all_x, y))
                 .copied()
                 .collect();
             borderline_indices.insert(class, borderline);
         }
 
-        // Collect original samples
-        let mut all_x: Vec<Vec<f64>> = x.rows()
-            .into_iter()
-            .map(|row| row.iter().copied().collect())
-            .collect();
         let mut all_y: Vec<i64> = y.iter().copied().collect();
         let mut n_synthetic = Vec::new();
 

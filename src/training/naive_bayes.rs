@@ -2,7 +2,7 @@
 //!
 //! Implements Gaussian Naive Bayes for continuous features.
 
-use ndarray::{Array1, Array2};
+use ndarray::{Array1, Array2, ArrayView1};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -134,7 +134,7 @@ impl GaussianNaiveBayes {
         for (i, row) in x.rows().into_iter().enumerate() {
             for (j, &class) in self.classes.iter().enumerate() {
                 let log_prior = self.priors[&class].ln();
-                let log_likelihood = self.log_likelihood(&row.to_owned(), class);
+                let log_likelihood = self.log_likelihood(row, class);
                 log_probs[[i, j]] = log_prior + log_likelihood;
             }
         }
@@ -157,7 +157,7 @@ impl GaussianNaiveBayes {
         log_probs.mapv(|v| v.exp())
     }
 
-    fn log_likelihood(&self, x: &Array1<f64>, class: i64) -> f64 {
+    fn log_likelihood(&self, x: ArrayView1<f64>, class: i64) -> f64 {
         let means = &self.means[&class];
         let vars = &self.variances[&class];
         

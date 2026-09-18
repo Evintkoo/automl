@@ -234,7 +234,7 @@ pub struct ADWIN {
     /// Confidence parameter (delta)
     delta: f64,
     /// Window of values
-    window: Vec<f64>,
+    window: std::collections::VecDeque<f64>,
     /// Sum of window values
     total: f64,
     /// Variance estimate
@@ -248,7 +248,7 @@ impl ADWIN {
     pub fn new(delta: f64) -> Self {
         Self {
             delta: delta.clamp(0.0001, 0.5),
-            window: Vec::new(),
+            window: std::collections::VecDeque::new(),
             total: 0.0,
             variance: 0.0,
             max_window: 10000,
@@ -264,12 +264,15 @@ impl ADWIN {
     /// Add element and detect drift
     pub fn add_element(&mut self, value: f64) -> DriftResult {
         // Add to window
-        self.window.push(value);
+        self.window.push_back(value);
         self.total += value;
 
-        // Limit window size
+        // Limit window size. `pop_front` on a VecDeque is O(1); the previous
+        // `Vec::remove(0)` shifted every remaining element down by one on
+        // every push once the window was at capacity (O(max_window) per
+        // call, forever, in steady state).
         while self.window.len() > self.max_window {
-            self.total -= self.window.remove(0);
+            self.total -= self.window.pop_front().unwrap();
         }
 
         let n = self.window.len();
@@ -277,7 +280,12 @@ impl ADWIN {
             return DriftResult::no_drift(0.0, self.delta);
         }
 
-        // Try different split points
+        // Try different split points. `make_contiguous` needs mutable access
+        // but is O(1) here in the common case (front/back-only push/pop keeps
+        // a VecDeque's live range contiguous within its ring buffer until it
+        // wraps past the allocation boundary).
+        let window_slice = self.window.make_contiguous();
+
         let mut drift_detected = false;
         let mut max_diff = 0.0;
         let mut best_split = 0;
@@ -287,8 +295,8 @@ impl ADWIN {
             let n1 = (n - split) as f64;
 
             // Mean of each half
-            let sum0: f64 = self.window[..split].iter().sum();
-            let sum1: f64 = self.window[split..].iter().sum();
+            let sum0: f64 = window_slice[..split].iter().sum();
+            let sum1: f64 = window_slice[split..].iter().sum();
             let mu0 = sum0 / n0;
             let mu1 = sum1 / n1;
 
@@ -307,8 +315,11 @@ impl ADWIN {
         }
 
         if drift_detected {
-            // Remove old data up to split point
-            self.window = self.window[best_split..].to_vec();
+            // Remove old data up to split point. `drain` on the front of a
+            // VecDeque moves only the retained elements, unlike the previous
+            // `self.window[best_split..].to_vec()`, which allocated a brand
+            // new buffer and copied the retained tail into it every time.
+            self.window.drain(0..best_split);
             self.total = self.window.iter().sum();
 
             DriftResult::drift(max_diff, 0.0, 2, "Distribution change detected (ADWIN)")

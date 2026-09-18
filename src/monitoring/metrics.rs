@@ -167,21 +167,31 @@ impl PerformanceMetrics {
             .unwrap_or(0.0)
     }
 
-    /// Get a percentile latency (e.g., p50, p95, p99)
-    pub fn percentile_latency(&self, percentile: f64) -> f64 {
+    /// Sorted snapshot of recorded latencies — a single read+sort that
+    /// `percentile_latency` and `summary` can both derive percentiles from,
+    /// instead of each percentile query re-cloning and re-sorting the whole
+    /// latency history from scratch.
+    fn sorted_latencies(&self) -> Vec<f64> {
         self.inner.read()
             .map(|inner| {
-                if inner.latencies.is_empty() {
-                    return 0.0;
-                }
-
                 let mut sorted: Vec<f64> = inner.latencies.iter().copied().collect();
                 sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-                let idx = ((percentile / 100.0) * (sorted.len() - 1) as f64) as usize;
-                sorted[idx]
+                sorted
             })
-            .unwrap_or(0.0)
+            .unwrap_or_default()
+    }
+
+    fn percentile_from_sorted(sorted: &[f64], percentile: f64) -> f64 {
+        if sorted.is_empty() {
+            return 0.0;
+        }
+        let idx = ((percentile / 100.0) * (sorted.len() - 1) as f64) as usize;
+        sorted[idx]
+    }
+
+    /// Get a percentile latency (e.g., p50, p95, p99)
+    pub fn percentile_latency(&self, percentile: f64) -> f64 {
+        Self::percentile_from_sorted(&self.sorted_latencies(), percentile)
     }
 
     /// Get P50 latency
@@ -262,6 +272,7 @@ impl PerformanceMetrics {
 
     /// Get a summary of all metrics
     pub fn summary(&self) -> MetricsSummary {
+        let sorted = self.sorted_latencies();
         MetricsSummary {
             total_requests: self.total_requests(),
             total_errors: self.total_errors(),
@@ -270,9 +281,9 @@ impl PerformanceMetrics {
             avg_latency_ms: self.avg_latency(),
             min_latency_ms: self.min_latency(),
             max_latency_ms: self.max_latency(),
-            p50_latency_ms: self.p50_latency(),
-            p95_latency_ms: self.p95_latency(),
-            p99_latency_ms: self.p99_latency(),
+            p50_latency_ms: Self::percentile_from_sorted(&sorted, 50.0),
+            p95_latency_ms: Self::percentile_from_sorted(&sorted, 95.0),
+            p99_latency_ms: Self::percentile_from_sorted(&sorted, 99.0),
             throughput: self.throughput(),
             uptime_secs: self.uptime_secs(),
         }

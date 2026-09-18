@@ -1006,7 +1006,8 @@ pub async fn start_training(
                     created_at: chrono::Utc::now().to_rfc3339(),
                     path: std::path::PathBuf::from(&model_path),
                 };
-                state_clone.models.insert(model_id, model_info);
+                state_clone.models.insert(model_id.clone(), model_info);
+                *state_clone.latest_model_id.write().await = Some(model_id);
 
                 // Update job status
                 let mut jobs = state_clone.jobs.write().await;
@@ -1439,14 +1440,27 @@ pub async fn predict(
             .to_string();
         (mid, mpath)
     } else {
-        let entry = state.models.iter()
-            .max_by_key(|e| e.value().created_at.clone())
-            .ok_or_else(|| ServerError::NotFound("No trained models available".to_string()))?;
-        let mid = entry.id.clone();
-        let mpath = entry.path.to_str()
-            .ok_or_else(|| ServerError::Internal("Invalid model path".to_string()))?
-            .to_string();
-        (mid, mpath)
+        // Look up the cached "latest model" id (kept up to date on every
+        // insert into `state.models`) instead of scanning every registered
+        // model on every request that omits `model_id`. Fall back to the
+        // full scan only if the cache is unexpectedly unset.
+        let cached_id = state.latest_model_id.read().await.clone();
+        if let Some(entry) = cached_id.as_ref().and_then(|id| state.models.get(id)) {
+            let mid = entry.id.clone();
+            let mpath = entry.path.to_str()
+                .ok_or_else(|| ServerError::Internal("Invalid model path".to_string()))?
+                .to_string();
+            (mid, mpath)
+        } else {
+            let entry = state.models.iter()
+                .max_by_key(|e| e.value().created_at.clone())
+                .ok_or_else(|| ServerError::NotFound("No trained models available".to_string()))?;
+            let mid = entry.id.clone();
+            let mpath = entry.path.to_str()
+                .ok_or_else(|| ServerError::Internal("Invalid model path".to_string()))?
+                .to_string();
+            (mid, mpath)
+        }
     };
 
     // Parse features from data field
@@ -1526,14 +1540,27 @@ pub async fn predict_batch(
             .to_string();
         (mid, mpath)
     } else {
-        let entry = state.models.iter()
-            .max_by_key(|e| e.value().created_at.clone())
-            .ok_or_else(|| ServerError::NotFound("No trained models available".to_string()))?;
-        let mid = entry.id.clone();
-        let mpath = entry.path.to_str()
-            .ok_or_else(|| ServerError::Internal("Invalid model path".to_string()))?
-            .to_string();
-        (mid, mpath)
+        // Look up the cached "latest model" id (kept up to date on every
+        // insert into `state.models`) instead of scanning every registered
+        // model on every request that omits `model_id`. Fall back to the
+        // full scan only if the cache is unexpectedly unset.
+        let cached_id = state.latest_model_id.read().await.clone();
+        if let Some(entry) = cached_id.as_ref().and_then(|id| state.models.get(id)) {
+            let mid = entry.id.clone();
+            let mpath = entry.path.to_str()
+                .ok_or_else(|| ServerError::Internal("Invalid model path".to_string()))?
+                .to_string();
+            (mid, mpath)
+        } else {
+            let entry = state.models.iter()
+                .max_by_key(|e| e.value().created_at.clone())
+                .ok_or_else(|| ServerError::NotFound("No trained models available".to_string()))?;
+            let mid = entry.id.clone();
+            let mpath = entry.path.to_str()
+                .ok_or_else(|| ServerError::Internal("Invalid model path".to_string()))?
+                .to_string();
+            (mid, mpath)
+        }
     };
 
     if request.data.is_empty() {
@@ -1609,14 +1636,27 @@ pub async fn predict_proba(
             .to_string();
         (mid, mpath)
     } else {
-        let entry = state.models.iter()
-            .max_by_key(|e| e.value().created_at.clone())
-            .ok_or_else(|| ServerError::NotFound("No trained models available".to_string()))?;
-        let mid = entry.id.clone();
-        let mpath = entry.path.to_str()
-            .ok_or_else(|| ServerError::Internal("Invalid model path".to_string()))?
-            .to_string();
-        (mid, mpath)
+        // Look up the cached "latest model" id (kept up to date on every
+        // insert into `state.models`) instead of scanning every registered
+        // model on every request that omits `model_id`. Fall back to the
+        // full scan only if the cache is unexpectedly unset.
+        let cached_id = state.latest_model_id.read().await.clone();
+        if let Some(entry) = cached_id.as_ref().and_then(|id| state.models.get(id)) {
+            let mid = entry.id.clone();
+            let mpath = entry.path.to_str()
+                .ok_or_else(|| ServerError::Internal("Invalid model path".to_string()))?
+                .to_string();
+            (mid, mpath)
+        } else {
+            let entry = state.models.iter()
+                .max_by_key(|e| e.value().created_at.clone())
+                .ok_or_else(|| ServerError::NotFound("No trained models available".to_string()))?;
+            let mid = entry.id.clone();
+            let mpath = entry.path.to_str()
+                .ok_or_else(|| ServerError::Internal("Invalid model path".to_string()))?
+                .to_string();
+            (mid, mpath)
+        }
     };
 
     let features: Vec<Vec<f64>> = serde_json::from_value(request.data)
@@ -7171,7 +7211,8 @@ pub async fn auto_tune(
                     created_at: chrono::Utc::now().to_rfc3339(),
                     path: std::path::PathBuf::from(&models_dir).join(format!("{}.model", model_id)),
                 };
-                state_clone.models.insert(model_id, model_info);
+                state_clone.models.insert(model_id.clone(), model_info);
+                *state_clone.latest_model_id.write().await = Some(model_id);
             }
         }
 
@@ -7939,6 +7980,7 @@ pub async fn apply_best_params(
                     path: std::path::PathBuf::from(&models_dir).join(format!("{}.model", model_id)),
                 };
                 state_clone.models.insert(model_id.clone(), model_info);
+                *state_clone.latest_model_id.write().await = Some(model_id.clone());
 
                 let completed_metrics = serde_json::json!({
                     "applied_params": true,

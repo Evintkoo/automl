@@ -69,10 +69,27 @@ impl AdaBoostClassifier {
         self
     }
 
-    /// Find the best decision stump given sample weights
-    fn fit_stump(x: &Array2<f64>, y: &Array1<f64>, weights: &Array1<f64>, classes: &[f64]) -> Stump {
+    /// Find the best decision stump given sample weights.
+    ///
+    /// `sorted_indices[f]` is the row order for feature `f` (ascending by
+    /// `x[[_, f]]`) and `class_idx` maps class value bits to an index — both
+    /// precomputed once by `fit` and passed in, since `x` and `classes` are
+    /// fixed for the whole fit and only `weights` changes each round.
+    /// Re-sorting every feature (an O(n log n) sort) and rebuilding
+    /// `class_idx` on every single boosting round, as this used to do, cost
+    /// O(n_estimators * n_features * n log n) for work that produces the
+    /// exact same sort order every time.
+    fn fit_stump(
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+        weights: &Array1<f64>,
+        classes: &[f64],
+        sorted_indices: &[Vec<usize>],
+        class_idx: &HashMap<u64, usize>,
+    ) -> Stump {
         let n_features = x.ncols();
         let n_samples = x.nrows();
+        let n_classes = classes.len();
 
         let mut best_stump = Stump {
             feature_index: 0,
@@ -83,21 +100,12 @@ impl AdaBoostClassifier {
         let mut best_error = f64::MAX;
 
         for f in 0..n_features {
-            // Sort samples by feature value
-            let mut order: Vec<usize> = (0..n_samples).collect();
-            order.sort_by(|&a, &b| x[[a, f]].partial_cmp(&x[[b, f]]).unwrap_or(std::cmp::Ordering::Equal));
-
-            // Build class-to-index mapping
-            let class_idx: HashMap<u64, usize> = classes.iter()
-                .enumerate()
-                .map(|(i, &c)| (c.to_bits(), i))
-                .collect();
-            let n_classes = classes.len();
+            let order = &sorted_indices[f];
 
             // Initialize: all samples on the right side
             let mut left_w = vec![0.0f64; n_classes];
             let mut right_w = vec![0.0f64; n_classes];
-            for &i in &order {
+            for &i in order {
                 if let Some(&ci) = class_idx.get(&y[i].to_bits()) {
                     right_w[ci] += weights[i];
                 }
@@ -166,8 +174,26 @@ impl AdaBoostClassifier {
         self.stumps.clear();
         self.alphas.clear();
 
+        // x and classes never change across rounds — only `weights` does —
+        // so the per-feature sort order and class-index map fit_stump needs
+        // can be computed once here instead of on every round.
+        let n_features = x.ncols();
+        let sorted_indices: Vec<Vec<usize>> = (0..n_features)
+            .map(|f| {
+                let mut order: Vec<usize> = (0..n_samples).collect();
+                order.sort_by(|&a, &b| {
+                    x[[a, f]].partial_cmp(&x[[b, f]]).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                order
+            })
+            .collect();
+        let class_idx: HashMap<u64, usize> = self.classes.iter()
+            .enumerate()
+            .map(|(i, &c)| (c.to_bits(), i))
+            .collect();
+
         for _round in 0..self.n_estimators {
-            let stump = Self::fit_stump(x, y, &weights, &self.classes);
+            let stump = Self::fit_stump(x, y, &weights, &self.classes, &sorted_indices, &class_idx);
 
             // Compute weighted error
             let mut error = 0.0;

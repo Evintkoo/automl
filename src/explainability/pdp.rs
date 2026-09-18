@@ -145,9 +145,13 @@ where
         // Compute individual predictions
         let mut individual_predictions = vec![vec![0.0; n_grid]; n_samples];
 
+        // Allocate the modified matrix once and reuse it across grid points:
+        // every iteration fully overwrites `feature_index` for every row
+        // before predicting, so there's nothing to restore between
+        // iterations and no need for a fresh full-matrix clone each time
+        // (this was previously O(n_grid) clones of the whole dataset).
+        let mut x_modified = x.clone();
         for (grid_idx, &grid_val) in grid_values.iter().enumerate() {
-            // Create modified data with feature set to grid value
-            let mut x_modified = x.clone();
             for i in 0..n_samples {
                 x_modified[[i, feature_index]] = grid_val;
             }
@@ -217,10 +221,13 @@ where
 
         let mut predictions = vec![vec![0.0; n_grid_2]; n_grid_1];
 
+        // As in compute_ice: reuse one buffer across the whole grid instead
+        // of cloning the full matrix for every (val_1, val_2) pair (was
+        // n_grid_1 * n_grid_2 full-matrix clones — 2500 by default).
+        let mut x_modified = x.clone();
         for (i, &val_1) in grid_1.iter().enumerate() {
             for (j, &val_2) in grid_2.iter().enumerate() {
                 // Modify both features
-                let mut x_modified = x.clone();
                 for k in 0..n_samples {
                     x_modified[[k, feature_1]] = val_1;
                     x_modified[[k, feature_2]] = val_2;

@@ -123,17 +123,30 @@ where
 
     /// Explain a single instance
     pub fn explain(&self, instance: &Array1<f64>) -> Result<LocalExplanation> {
-        self.explain_instance(instance, 0)
+        let base_value = self.compute_base_value()?;
+        self.explain_instance(instance, 0, base_value)
     }
 
     /// Explain multiple instances
     pub fn explain_batch(&self, instances: &Array2<f64>) -> Result<Vec<LocalExplanation>> {
+        // The background dataset and predict_fn are the same for every
+        // instance in the batch, so the expected prediction over the
+        // background is invariant across the whole batch — compute it once
+        // instead of once per instance (this used to re-run predict_fn over
+        // the full background set for every single row).
+        let base_value = self.compute_base_value()?;
         instances
             .rows()
             .into_iter()
             .enumerate()
-            .map(|(idx, row)| self.explain_instance(&row.to_owned(), idx))
+            .map(|(idx, row)| self.explain_instance(&row.to_owned(), idx, base_value))
             .collect()
+    }
+
+    /// Expected prediction over the background dataset — the SHAP "base value".
+    fn compute_base_value(&self) -> Result<f64> {
+        let bg_preds = (self.predict_fn)(&self.background)?;
+        Ok(bg_preds.mean().unwrap_or(0.0))
     }
 
     /// Internal method to explain a single instance
@@ -141,16 +154,13 @@ where
         &self,
         instance: &Array1<f64>,
         instance_index: usize,
+        base_value: f64,
     ) -> Result<LocalExplanation> {
         let n_features = instance.len();
         let mut rng = match self.seed {
             Some(seed) => StdRng::seed_from_u64(seed + instance_index as u64),
             None => StdRng::from_entropy(),
         };
-
-        // Compute base value (expected prediction on background)
-        let bg_preds = (self.predict_fn)(&self.background)?;
-        let base_value = bg_preds.mean().unwrap_or(0.0);
 
         // Compute actual prediction
         let instance_2d = instance.clone().insert_axis(ndarray::Axis(0));

@@ -17,6 +17,12 @@ pub trait Pruner: Send + Sync {
 pub struct TrialHistory {
     /// Values per trial: trial_id -> (step -> value)
     values: HashMap<usize, HashMap<usize, f64>>,
+    /// Same data, transposed: step -> (trial_id -> value). Kept in sync with
+    /// `values` on every `report()` call so `get_step_values` — called once
+    /// per step per trial from `should_prune` — doesn't need to scan every
+    /// trial ever reported (O(n_trials) per call, O(n_trials^2 * n_steps)
+    /// over an optimization run) to find the handful reporting this step.
+    by_step: HashMap<usize, HashMap<usize, f64>>,
 }
 
 impl TrialHistory {
@@ -31,6 +37,10 @@ impl TrialHistory {
             .entry(trial_id)
             .or_insert_with(HashMap::new)
             .insert(step, value);
+        self.by_step
+            .entry(step)
+            .or_insert_with(HashMap::new)
+            .insert(trial_id, value);
     }
 
     /// Get all values for a trial
@@ -45,10 +55,10 @@ impl TrialHistory {
 
     /// Get all values at a specific step across trials
     pub fn get_step_values(&self, step: usize) -> Vec<f64> {
-        self.values
-            .values()
-            .filter_map(|trial| trial.get(&step).copied())
-            .collect()
+        self.by_step
+            .get(&step)
+            .map(|trials| trials.values().copied().collect())
+            .unwrap_or_default()
     }
 
     /// Get number of trials

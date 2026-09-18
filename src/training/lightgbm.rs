@@ -218,8 +218,34 @@ fn build_lgb_tree(
         let left_id = nodes.len();
         let right_id = nodes.len() + 1;
 
-        nodes.push(NodeSlot::Leaf(split.left_indices.clone()));
-        nodes.push(NodeSlot::Leaf(split.right_indices.clone()));
+        // Look for further splits in each child *before* moving
+        // left_indices/right_indices into the leaf nodes below — this used
+        // to clone both index vectors just to hand ownership to `nodes`
+        // while still needing the originals here for split-finding right
+        // afterward. Same reads, same results, no clone.
+        let mut child_pending: [Option<PendingSplit>; 2] = [None, None];
+        if depth + 1 < max_depth_limit {
+            for (slot, (child_id, child_indices)) in
+                [(left_id, &split.left_indices), (right_id, &split.right_indices)]
+                    .into_iter()
+                    .enumerate()
+            {
+                if child_indices.len() < config.min_child_samples * 2 { continue; }
+                let child_splits: Vec<_> = feature_indices.par_iter().filter_map(|&feat| {
+                    find_best_split_for_feature(x, gradients, hessians, child_indices, feat, config.reg_lambda, config.min_child_samples)
+                        .map(|(thr, gain, li, ri)| (feat, thr, gain, li, ri))
+                }).collect();
+                if let Some(best) = child_splits.into_iter().max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(Ordering::Equal)) {
+                    child_pending[slot] = Some(PendingSplit {
+                        gain: best.2, node_id: child_id, feature: best.0, threshold: best.1,
+                        left_indices: best.3, right_indices: best.4,
+                    });
+                }
+            }
+        }
+
+        nodes.push(NodeSlot::Leaf(split.left_indices));
+        nodes.push(NodeSlot::Leaf(split.right_indices));
         depths.push(depth + 1);
         depths.push(depth + 1);
 
@@ -228,20 +254,9 @@ fn build_lgb_tree(
         };
         n_leaves += 1;
 
-        // Try splitting children
-        if depth + 1 < max_depth_limit {
-            for (child_id, child_indices) in [(left_id, &split.left_indices), (right_id, &split.right_indices)] {
-                if child_indices.len() < config.min_child_samples * 2 { continue; }
-                let child_splits: Vec<_> = feature_indices.par_iter().filter_map(|&feat| {
-                    find_best_split_for_feature(x, gradients, hessians, child_indices, feat, config.reg_lambda, config.min_child_samples)
-                        .map(|(thr, gain, li, ri)| (feat, thr, gain, li, ri))
-                }).collect();
-                if let Some(best) = child_splits.into_iter().max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(Ordering::Equal)) {
-                    heap.push(PendingSplit {
-                        gain: best.2, node_id: child_id, feature: best.0, threshold: best.1,
-                        left_indices: best.3, right_indices: best.4,
-                    });
-                }
+        for pending in child_pending {
+            if let Some(pending) = pending {
+                heap.push(pending);
             }
         }
     }

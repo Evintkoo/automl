@@ -97,6 +97,15 @@ pub async fn run_server(config: ServerConfig) -> anyhow::Result<()> {
     // Restore previously-trained models from disk so they survive server restarts
     crate::server::state::restore_models_from_disk(&config.models_dir, &state.models);
 
+    // Seed the "latest model" cache from a one-time max-by-created_at scan.
+    // Restored models' created_at is the file's mtime, not restoration
+    // order, so (unlike the live insert sites, which can just overwrite the
+    // cache unconditionally since their created_at is always "now") this
+    // needs an actual scan — but only once, at startup, not per request.
+    if let Some(entry) = state.models.iter().max_by_key(|e| e.value().created_at.clone()) {
+        *state.latest_model_id.write().await = Some(entry.id.clone());
+    }
+
     // Periodically evict stale jobs/train-engines/insights/studies so long-running
     // servers don't grow memory unbounded. `evict_stale_entries()` previously existed
     // but was never invoked anywhere; wire it up as a background task for the lifetime

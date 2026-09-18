@@ -3,7 +3,7 @@
 //! Implements GP regression with various kernels and acquisition functions
 //! for intelligent hyperparameter search.
 
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2, ArrayView1, Axis};
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
@@ -40,24 +40,25 @@ fn compute_kernel(x1: &Array2<f64>, x2: &Array2<f64>, kernel: &KernelType) -> Ar
 
     for i in 0..n1 {
         for j in 0..n2 {
-            let xi = x1.row(i);
-            let xj = x2.row(j);
-            k[[i, j]] = kernel_value(&xi.to_owned(), &xj.to_owned(), kernel);
+            // Pass views instead of `.to_owned()` clones — every one of the
+            // n1*n2 kernel evaluations was heap-allocating two fresh Array1s
+            // just to read their values once each.
+            k[[i, j]] = kernel_value(x1.row(i), x2.row(j), kernel);
         }
     }
     k
 }
 
 /// Compute kernel value between two points
-fn kernel_value(x1: &Array1<f64>, x2: &Array1<f64>, kernel: &KernelType) -> f64 {
+fn kernel_value(x1: ArrayView1<f64>, x2: ArrayView1<f64>, kernel: &KernelType) -> f64 {
     match kernel {
         KernelType::RBF { length_scale } => {
-            let diff = x1 - x2;
+            let diff = &x1 - &x2;
             let dist_sq = diff.dot(&diff);
             (-0.5 * dist_sq / (length_scale * length_scale)).exp()
         }
         KernelType::Matern { nu, length_scale } => {
-            let diff = x1 - x2;
+            let diff = &x1 - &x2;
             let dist = diff.dot(&diff).sqrt();
             let scaled = (2.0_f64.sqrt() * nu.sqrt() * dist) / length_scale;
             
@@ -83,7 +84,7 @@ fn kernel_value(x1: &Array1<f64>, x2: &Array1<f64>, kernel: &KernelType) -> f64 
             }
         }
         KernelType::RationalQuadratic { length_scale, alpha } => {
-            let diff = x1 - x2;
+            let diff = &x1 - &x2;
             let dist_sq = diff.dot(&diff);
             (1.0 + dist_sq / (2.0 * alpha * length_scale * length_scale)).powf(-*alpha)
         }
@@ -221,11 +222,7 @@ impl GaussianProcess {
         
         for i in 0..n_test {
             // k(x*, x*)
-            let k_self = kernel_value(
-                &x_test.row(i).to_owned(),
-                &x_test.row(i).to_owned(),
-                &self.kernel,
-            );
+            let k_self = kernel_value(x_test.row(i), x_test.row(i), &self.kernel);
             
             // Solve L @ v = k*[i]
             let k_star_i = k_star.row(i).to_owned();
@@ -730,7 +727,7 @@ mod tests {
         let x2 = Array1::from_vec(vec![0.0, 0.0]);
         let kernel = KernelType::RBF { length_scale: 1.0 };
         
-        let k = kernel_value(&x1, &x2, &kernel);
+        let k = kernel_value(x1.view(), x2.view(), &kernel);
         assert!((k - 1.0).abs() < 1e-6, "Same point should have kernel 1.0");
     }
 
@@ -740,7 +737,7 @@ mod tests {
         let x2 = Array1::from_vec(vec![0.0]);
         let kernel = KernelType::Matern { nu: 2.5, length_scale: 1.0 };
         
-        let k = kernel_value(&x1, &x2, &kernel);
+        let k = kernel_value(x1.view(), x2.view(), &kernel);
         assert!((k - 1.0).abs() < 1e-6, "Same point should have kernel 1.0");
     }
 

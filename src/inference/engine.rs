@@ -51,6 +51,14 @@ pub struct InferenceEngine {
     preprocessing_cache: Option<Arc<LruTtlCache<u64, DataFrame>>>,
     /// Tracks whether the last prediction was a cache hit
     last_cache_hit: AtomicBool,
+    /// Dedicated rayon thread pool sized per `config.n_workers`, built once
+    /// (lazily, on first use — see `get_or_build_worker_pool`) and reused by
+    /// every subsequent `predict_parallel` call. This used to be rebuilt
+    /// from scratch (spawning a brand new OS thread pool) on every single
+    /// large-batch prediction; `config.n_workers` never changes after
+    /// construction (there's no setter on `InferenceEngine` for it), so
+    /// there was nothing to gain from rebuilding it per call.
+    worker_pool: std::sync::OnceLock<Option<Arc<rayon::ThreadPool>>>,
 }
 
 impl std::fmt::Debug for InferenceEngine {
@@ -116,7 +124,34 @@ impl InferenceEngine {
             metrics: Arc::new(PerformanceMetrics::new(10000)),
             is_warmed_up: false,
             last_cache_hit: AtomicBool::new(false),
+            worker_pool: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Get the cached dedicated thread pool (building it on first call), or
+    /// `None` if `config.n_workers` isn't set (meaning "use rayon's global
+    /// pool"). A build failure is surfaced as an error on whichever call
+    /// triggers it, same as when this was rebuilt on every call.
+    fn get_or_build_worker_pool(&self) -> Result<Option<Arc<rayon::ThreadPool>>> {
+        if let Some(pool) = self.worker_pool.get() {
+            return Ok(pool.clone());
+        }
+
+        let pool = match self.config.n_workers {
+            Some(n_workers) => Some(Arc::new(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(n_workers)
+                    .build()
+                    .map_err(|e| AutoMLError::InferenceError(format!("Thread pool error: {}", e)))?,
+            )),
+            None => None,
+        };
+
+        // Benign race: if another thread already initialized this concurrently,
+        // both pools are equally valid (built from the same fixed config) —
+        // just use whichever one we personally have rather than erroring.
+        let _ = self.worker_pool.set(pool.clone());
+        Ok(pool)
     }
 
     /// Load a preprocessor
@@ -618,17 +653,8 @@ impl InferenceEngine {
         let batch_size = self.adaptive_batch_size(n_rows, n_cols).max(1);
         let n_batches = (n_rows + batch_size - 1) / batch_size;
 
-        // Configure rayon thread pool size if specified
-        let pool = if let Some(n_workers) = self.config.n_workers {
-            Some(
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(n_workers)
-                    .build()
-                    .map_err(|e| AutoMLError::InferenceError(format!("Thread pool error: {}", e)))?
-            )
-        } else {
-            None
-        };
+        // Reuse the cached thread pool sized per `config.n_workers`.
+        let pool = self.get_or_build_worker_pool()?;
 
         // Prepare batch slices
         let batches: Vec<DataFrame> = (0..n_batches)

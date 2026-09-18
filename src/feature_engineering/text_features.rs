@@ -169,8 +169,13 @@ impl CountVectorizer {
                 *counts.entry(ngram.as_str()).or_insert(0.0) += 1.0;
             }
 
-            for (term, &idx) in &self.vocabulary {
-                if let Some(&count) = counts.get(term.as_str()) {
+            // Walk the document's own (typically short) term list and look each
+            // up in the vocabulary, instead of walking the entire vocabulary
+            // (which can be tens of thousands of terms with max_features unset)
+            // and probing it against this one document's counts. Same result,
+            // O(doc_length) per document instead of O(vocab_size).
+            for (term, &count) in &counts {
+                if let Some(&idx) = self.vocabulary.get(*term) {
                     result[[doc_idx, idx]] = if self.binary { 1.0 } else { count };
                 }
             }
