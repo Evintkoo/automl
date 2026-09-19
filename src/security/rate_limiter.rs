@@ -1,5 +1,5 @@
 use serde::{Serialize, Deserialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -32,7 +32,12 @@ impl Default for RateLimitConfig {
 
 #[derive(Debug)]
 struct ClientState {
-    request_times: Vec<Instant>,
+    /// Timestamps of requests within the current sliding window, oldest first
+    /// (always pushed in increasing-time order at the back). A `VecDeque` lets
+    /// stale entries be popped from the front in O(1) amortized time instead
+    /// of rescanning/rebuilding the whole collection via `retain` on every
+    /// request.
+    request_times: VecDeque<Instant>,
     tokens: f64,
     last_refill: Instant,
     window_start: Instant,
@@ -45,7 +50,7 @@ impl ClientState {
     fn new(burst_size: u32) -> Self {
         let now = Instant::now();
         Self {
-            request_times: Vec::new(),
+            request_times: VecDeque::new(),
             tokens: burst_size as f64,
             last_refill: now,
             window_start: now,
@@ -115,9 +120,13 @@ impl RateLimiter {
             RateLimitAlgorithm::SlidingWindow => {
                 let now = Instant::now();
                 let window = std::time::Duration::from_secs(self.config.window_seconds);
-                let count = state.request_times.iter()
-                    .filter(|t| now.duration_since(**t) < window)
-                    .count() as u32;
+                while let Some(&front) = state.request_times.front() {
+                    if now.duration_since(front) < window {
+                        break;
+                    }
+                    state.request_times.pop_front();
+                }
+                let count = state.request_times.len() as u32;
                 self.config.requests_per_window.saturating_sub(count)
             }
             RateLimitAlgorithm::TokenBucket => {
@@ -156,10 +165,15 @@ impl RateLimiter {
     fn check_sliding_window(&self, state: &mut ClientState) -> bool {
         let now = Instant::now();
         let window = std::time::Duration::from_secs(self.config.window_seconds);
-        state.request_times.retain(|t| now.duration_since(*t) < window);
+        while let Some(&front) = state.request_times.front() {
+            if now.duration_since(front) < window {
+                break;
+            }
+            state.request_times.pop_front();
+        }
 
         if (state.request_times.len() as u32) < self.config.requests_per_window {
-            state.request_times.push(now);
+            state.request_times.push_back(now);
             true
         } else {
             false
