@@ -7,13 +7,14 @@
 //! - Fuzzy simplicial set with binary-search sigma
 //! - SGD layout optimization with negative sampling
 
+use crate::training::knn::{DistanceMetric, KDTree};
 use crate::utils::simd::SimdOps;
+use ndarray::Array2;
 use rand::Rng;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::BinaryHeap;
 use std::cmp::Ordering;
 
 /// UMAP configuration parameters
@@ -52,34 +53,6 @@ impl Default for UmapConfig {
             random_state: 42,
             max_samples: 10_000,
         }
-    }
-}
-
-/// A neighbor entry for the min-heap (max-heap by distance for eviction)
-#[derive(Clone)]
-struct Neighbor {
-    index: usize,
-    distance: f64,
-}
-
-impl PartialEq for Neighbor {
-    fn eq(&self, other: &Self) -> bool {
-        self.distance == other.distance
-    }
-}
-
-impl Eq for Neighbor {}
-
-impl PartialOrd for Neighbor {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Neighbor {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Max-heap by distance so we can evict the farthest neighbor
-        self.distance.partial_cmp(&other.distance).unwrap_or(Ordering::Equal)
     }
 }
 
@@ -186,41 +159,48 @@ impl Umap {
         Ok(embedding)
     }
 
-    /// Phase 1: Compute k-nearest neighbors using brute force + SIMD distances.
-    /// Parallelized over samples with rayon.
+    /// Phase 1: Compute k-nearest neighbors via a KD-tree (falls back to a brute-force
+    /// SIMD scan for degenerate inputs). Parallelized over samples with rayon.
+    ///
+    /// The original brute-force scan computed a distance to every other point for
+    /// every query point (O(n^2)); a KD-tree brings the average case down to
+    /// O(n log n) for the low/moderate dimensionality this is normally run on.
+    /// Each query point is one of the tree's own rows, so it queries k+1 nearest
+    /// and filters its own index out (mirroring the `exclude_self` pattern used by
+    /// LOF/DBSCAN's KD-tree lookups) rather than never considering itself a
+    /// candidate in the first place, as the brute-force loop did. In the
+    /// vanishingly unlikely case of more than k exact-duplicate points at distance
+    /// zero, this could in principle drop a point's own index from its neighbor
+    /// set instead of another zero-distance duplicate — the same documented,
+    /// negligible-probability caveat already accepted for LOF/DBSCAN.
     fn compute_knn(
         &self,
         data: &[Vec<f64>],
         k: usize,
     ) -> (Vec<Vec<usize>>, Vec<Vec<f64>>) {
         let n = data.len();
+        let n_dims = data.first().map(|row| row.len()).unwrap_or(0);
+
+        if n == 0 || n_dims == 0 {
+            return (vec![Vec::new(); n], vec![Vec::new(); n]);
+        }
+
+        let flat: Vec<f64> = data.iter().flat_map(|row| row.iter().copied()).collect();
+        let array_data = Array2::from_shape_vec((n, n_dims), flat)
+            .expect("flattened row-major data always matches (n, n_dims)");
+        let tree = KDTree::build(&array_data);
 
         let results: Vec<(Vec<usize>, Vec<f64>)> = (0..n)
             .into_par_iter()
             .map(|i| {
-                let mut heap: BinaryHeap<Neighbor> = BinaryHeap::with_capacity(k + 1);
+                let mut kd_results =
+                    tree.query_k_nearest(&data[i], &array_data, k + 1, DistanceMetric::Euclidean);
+                kd_results.retain(|&(_, idx)| idx != i);
+                kd_results.truncate(k);
+                kd_results.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
 
-                for j in 0..n {
-                    if i == j {
-                        continue;
-                    }
-                    let dist = SimdOps::squared_euclidean_distance(&data[i], &data[j]).sqrt();
-
-                    if heap.len() < k {
-                        heap.push(Neighbor { index: j, distance: dist });
-                    } else if let Some(top) = heap.peek() {
-                        if dist < top.distance {
-                            heap.pop();
-                            heap.push(Neighbor { index: j, distance: dist });
-                        }
-                    }
-                }
-
-                let mut neighbors: Vec<Neighbor> = heap.into_vec();
-                neighbors.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
-
-                let indices: Vec<usize> = neighbors.iter().map(|n| n.index).collect();
-                let distances: Vec<f64> = neighbors.iter().map(|n| n.distance).collect();
+                let indices: Vec<usize> = kd_results.iter().map(|&(_, idx)| idx).collect();
+                let distances: Vec<f64> = kd_results.iter().map(|&(d, _)| d).collect();
                 (indices, distances)
             })
             .collect();
@@ -556,5 +536,125 @@ mod tests {
         // fit_transform must still work (delegates to with_cb with no-op)
         let result = umap.fit_transform(&data).unwrap();
         assert_eq!(result.len(), data.len());
+    }
+}
+
+/// Verifies the KD-tree-backed `compute_knn` returns the same neighbor sets/distances
+/// as the original brute-force scan, since this touches both float-accumulation order
+/// (SIMD vs. the KD-tree's scalar `compute_distance`) and traversal-order tie-breaking.
+#[cfg(test)]
+mod knn_differential {
+    use super::*;
+    use std::collections::BinaryHeap;
+
+    #[derive(Clone)]
+    struct RefNeighbor {
+        index: usize,
+        distance: f64,
+    }
+    impl PartialEq for RefNeighbor {
+        fn eq(&self, other: &Self) -> bool {
+            self.distance == other.distance
+        }
+    }
+    impl Eq for RefNeighbor {}
+    impl PartialOrd for RefNeighbor {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for RefNeighbor {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.distance.partial_cmp(&other.distance).unwrap_or(Ordering::Equal)
+        }
+    }
+
+    // Verbatim copy of the pre-optimization brute-force compute_knn, kept only as a
+    // reference to check the KD-tree version against.
+    fn reference_compute_knn(data: &[Vec<f64>], k: usize) -> (Vec<Vec<usize>>, Vec<Vec<f64>>) {
+        let n = data.len();
+        let mut knn_indices = Vec::with_capacity(n);
+        let mut knn_distances = Vec::with_capacity(n);
+
+        for i in 0..n {
+            let mut heap: BinaryHeap<RefNeighbor> = BinaryHeap::with_capacity(k + 1);
+            for j in 0..n {
+                if i == j {
+                    continue;
+                }
+                let dist = SimdOps::squared_euclidean_distance(&data[i], &data[j]).sqrt();
+                if heap.len() < k {
+                    heap.push(RefNeighbor { index: j, distance: dist });
+                } else if let Some(top) = heap.peek() {
+                    if dist < top.distance {
+                        heap.pop();
+                        heap.push(RefNeighbor { index: j, distance: dist });
+                    }
+                }
+            }
+            let mut neighbors: Vec<RefNeighbor> = heap.into_vec();
+            neighbors.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
+            knn_indices.push(neighbors.iter().map(|n| n.index).collect());
+            knn_distances.push(neighbors.iter().map(|n| n.distance).collect());
+        }
+        (knn_indices, knn_distances)
+    }
+
+    // Small dependency-free xorshift64 PRNG for deterministic stress data.
+    struct Xorshift64(u64);
+    impl Xorshift64 {
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn next_f64(&mut self) -> f64 {
+            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    fn make_data(n: usize, dims: usize, seed: u64) -> Vec<Vec<f64>> {
+        let mut rng = Xorshift64(seed | 1);
+        (0..n)
+            .map(|_| (0..dims).map(|_| rng.next_f64() * 100.0).collect())
+            .collect()
+    }
+
+    #[test]
+    fn kd_tree_matches_brute_force_reference() {
+        let umap = Umap::new(UmapConfig::default());
+
+        for &(n, dims, k) in &[(30usize, 2usize, 5usize), (80, 4, 10), (15, 3, 3), (50, 8, 15)] {
+            // Continuous random coordinates make exact-distance ties (and hence any
+            // traversal-order-dependent tie-break ambiguity) vanishingly unlikely.
+            let seed = 1000 * n as u64 + 100 * dims as u64 + k as u64 + 42;
+            let data = make_data(n, dims, seed);
+
+            let (ref_idx, ref_dist) = reference_compute_knn(&data, k);
+            let (got_idx, got_dist) = umap.compute_knn(&data, k);
+
+            for i in 0..n {
+                assert_eq!(
+                    ref_idx[i].len(),
+                    got_idx[i].len(),
+                    "neighbor count mismatch at n={n} dims={dims} k={k} i={i}"
+                );
+                for j in 0..ref_idx[i].len() {
+                    assert_eq!(
+                        ref_idx[i][j], got_idx[i][j],
+                        "neighbor index mismatch at n={n} dims={dims} k={k} i={i} j={j}"
+                    );
+                    assert!(
+                        (ref_dist[i][j] - got_dist[i][j]).abs() < 1e-9,
+                        "distance mismatch at n={n} dims={dims} k={k} i={i} j={j}: ref={} got={}",
+                        ref_dist[i][j],
+                        got_dist[i][j]
+                    );
+                }
+            }
+        }
     }
 }
