@@ -1,5 +1,5 @@
 {
-  "status": "done",
+  "status": "testing",
   "title": "Kolosal AutoML",
   "description": "A single-crate Rust AutoML framework covering data prep, model search, trust/quality tooling, and serving in one binary.",
   "nodes": {
@@ -9,49 +9,49 @@
       "description": "Standard/MinMax/Robust scalers, OneHot/Label/Target/Hash encoders, and Log/Power/Box-Cox/Yeo-Johnson transformers."
     },
     "missing-value-imputation": {
-      "status": "done",
+      "status": "testing",
       "title": "Missing Value Imputation",
-      "description": "Mean/median/mode/forward-fill plus MICE, KNN, and iterative imputers fill gaps before training."
+      "description": "Mean/median/mode/forward-fill wired into the main pipeline; standalone MICE, KNN, and iterative (linear/ridge/tree) imputers are implemented but not yet connected to the AutoML pipeline."
     },
     "feature-engineering": {
-      "status": "done",
+      "status": "testing",
       "title": "Feature Engineering",
-      "description": "Generates polynomial features, pairwise interactions, and TF-IDF vectors to expand the feature space automatically."
+      "description": "Generates polynomial features, pairwise interactions, and TF-IDF vectors to expand the feature space automatically; not yet wired into the automated pipeline."
     },
     "synthetic-data-balancing": {
-      "status": "done",
+      "status": "testing",
       "title": "Synthetic Data Balancing",
-      "description": "SMOTE, ADASYN, and random oversampling correct class imbalance, with a recently re-optimized neighbor search."
+      "description": "SMOTE (regular + Borderline1/2), ADASYN, random over/undersampling, and NearMiss undersampling (v1/v2; v3 currently behaves like v1)."
     },
     "time-series-utilities": {
-      "status": "done",
+      "status": "testing",
       "title": "Time Series Utilities",
-      "description": "Time-series-specific feature extraction, differencing, and time-aware cross-validation splitting."
+      "description": "Lag/rolling/EWM feature extraction, differencing and additive/multiplicative seasonal decomposition, and time-aware CV (expanding/sliding walk-forward, blocked, and purged+embargo splitting)."
     },
     "multi-model-training-engine": {
       "status": "done",
       "title": "Multi-Model Training Engine",
-      "description": "Trains and cross-validates 17+ algorithms (linear/logistic regression, decision trees, random forest, SVM, etc.) behind one unified interface."
+      "description": "Trains 20+ algorithms (linear/logistic regression, decision trees, random forest, SVM, XGBoost, LightGBM, CatBoost, etc.) behind one unified interface, with a separate k-fold/stratified/time-series cross-validation toolkit."
     },
     "hyperoptx-hyperparameter-search": {
-      "status": "done",
+      "status": "testing",
       "title": "HyperOptX Hyperparameter Search",
-      "description": "Bayesian (Gaussian-process/TPE), random, and grid samplers with median/percentile/Hyperband pruners."
+      "description": "Bayesian (Gaussian-process) and TPE samplers with median/percentile/Hyperband pruners; grid search is not yet implemented (falls back to random/TPE)."
     },
     "autopipeline-construction": {
-      "status": "done",
+      "status": "in-progress",
       "title": "AutoPipeline Construction",
-      "description": "Auto-detects column/data types and assembles a preprocessing-to-training pipeline without manual configuration."
+      "description": "Auto-detects numeric/categorical columns from array data and composes a preprocessing plan (impute/scale/outlier/transform); categorical encoding, feature selection, and model training are planned but not yet wired up."
     },
     "ensemble-methods": {
-      "status": "done",
+      "status": "testing",
       "title": "Ensemble Methods",
-      "description": "Voting and stacking ensembles combine multiple trained models into one predictor."
+      "description": "Voting ensembles (hard/soft, weighted) are implemented and tested. Stacking and blending meta-learners exist with correct out-of-fold logic but lack functional test coverage, and aren't yet wired into the main training engine (which currently treats 'stacking' as plain averaging)."
     },
     "neural-architecture-search": {
-      "status": "testing",
+      "status": "in-progress",
       "title": "Neural Architecture Search",
-      "description": "DARTS-style differentiable search plus TabNet/FT-Transformer architectures, hand-implemented over ndarray with no autodiff crate."
+      "description": "REINFORCE controller and a DARTS-inspired hill-climbing architecture search, hand-implemented over ndarray with no autodiff crate and real (if crude) proxy evaluation; TabNet and FT-Transformer are currently stub architectures (no training, and FT-Transformer's predict always returns 0) not yet wired to the real GLU/sparsemax/attention layers implemented alongside them."
     },
     "explainability": {
       "status": "done",
@@ -59,9 +59,9 @@
       "description": "Permutation importance, partial dependence (1D/2D/ICE), and a kernel-SHAP-like local explainer for per-prediction attributions."
     },
     "probability-calibration": {
-      "status": "done",
+      "status": "in-progress",
       "title": "Probability Calibration",
-      "description": "Platt scaling, isotonic regression, temperature scaling, and beta calibration, with ECE/MCE/Brier-score reporting."
+      "description": "Platt scaling, isotonic regression, and temperature scaling (with ECE/MCE/Brier-score reporting); beta calibration is implemented but not yet exposed in the public API."
     },
     "drift-detection": {
       "status": "done",
@@ -71,22 +71,22 @@
     "anomaly-detection": {
       "status": "done",
       "title": "Anomaly Detection",
-      "description": "Isolation Forest and Local Outlier Factor detect outliers, both backed by a KD-tree neighbor search."
+      "description": "Isolation Forest and a KD-tree-backed Local Outlier Factor detect outliers via random-split isolation trees and local density ratios respectively."
     },
     "pipeline-quality-gates": {
-      "status": "done",
+      "status": "testing",
       "title": "Pipeline Quality Gates",
-      "description": "A four-gate quality pipeline (pre-training, training, hyperopt convergence, post-training calibration/OOD) backed by a dedicated integration test suite."
+      "description": "A four-gate quality pipeline (pre-training, training, hyperopt convergence, post-training calibration/OOD) with a passing dedicated integration test suite; pre-training and post-training gates run on real data in production, while the training and hyperopt gates are currently wired with placeholder inputs rather than live CV/ensemble/hyperopt results."
     },
     "web-dashboard-cli": {
-      "status": "done",
+      "status": "testing",
       "title": "Web Dashboard & CLI",
-      "description": "An Axum-served htmx+Alpine dashboard (upload, configure, train, monitor) and a CLI (train/predict/preprocess/benchmark/serve) share one binary."
+      "description": "An Axum-served htmx+Alpine dashboard (upload, configure, train, monitor) and a CLI (train/predict/preprocess/benchmark/serve) share one binary; e2e coverage exists for visualization and training APIs but not the full dashboard workflow."
     },
     "inference-model-export": {
-      "status": "done",
+      "status": "in-progress",
       "title": "Inference & Model Export",
-      "description": "A batching/caching inference engine plus ONNX/PMML export, a model registry, and versioning."
+      "description": "A batching/caching inference engine (real, tested) alongside ONNX/PMML export and model-registry code that exists as a standalone, well-tested library module but isn't wired into the server's export endpoint, which currently writes generic metadata rather than real ONNX/PMML files."
     },
     "security-access-control": {
       "status": "done",
@@ -96,7 +96,7 @@
     "iso-compliance-suite": {
       "status": "in-progress",
       "title": "ISO Compliance Suite",
-      "description": "Fairness/bias scanning, PII detection, data-lineage/provenance tracking, and compliance reporting toward ISO 42001/27701/TR 24027."
+      "description": "Fairness/bias scanning, PII detection, and data-lineage/provenance tracking are fully implemented; ISO 42001/27701/TR 24027 compliance reporting exists with standard-specific control mappings but is currently a self-reported checklist — the live API only derives a few capability flags from real system state and hardcodes the rest as compliant."
     }
   }
 }
