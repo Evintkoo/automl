@@ -1,11 +1,10 @@
 //! LRU Cache with TTL Support
 //!
-//! A thread-safe LRU cache with time-to-live expiration.
-//! Uses a single coordinated lock to eliminate lock overhead,
-//! improve cache locality, and prevent deadlocks.
+//! A thread-safe, sharded LRU cache with time-to-live expiration.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
@@ -53,8 +52,10 @@ struct LruNode<K> {
     next: Option<usize>,
 }
 
-/// Inner state protected by a single lock
+/// Inner state protected by a single lock: one shard's worth of the cache.
 struct CacheInner<K, V> {
+    /// This shard's share of the cache's total capacity
+    max_size: usize,
     /// The cache storage
     cache: HashMap<K, (usize, CacheEntry<V>)>,
     /// LRU order tracking (index -> node)
@@ -70,6 +71,7 @@ struct CacheInner<K, V> {
 impl<K: Eq + Hash + Clone, V: Clone> CacheInner<K, V> {
     fn new(max_size: usize) -> Self {
         Self {
+            max_size,
             cache: HashMap::with_capacity(max_size),
             lru_list: Vec::with_capacity(max_size),
             head: None,
@@ -176,21 +178,38 @@ impl<K: Eq + Hash + Clone, V: Clone> CacheInner<K, V> {
     }
 }
 
+/// Target entries per shard when sizing the shard count. A cache stays a
+/// single shard (byte-for-byte the original unsharded design, with exact
+/// global LRU order) until it's large enough for cross-key lock contention
+/// between concurrent callers to plausibly matter.
+const SHARD_TARGET_ENTRIES: usize = 64;
+/// Upper bound on shard count — enough to spread contention across a typical
+/// server's concurrent request load without fragmenting capacity too finely.
+const MAX_SHARDS: usize = 16;
+
 /// LRU Cache with TTL support
 ///
-/// All internal state is protected by a single `RwLock`, eliminating the
-/// overhead and deadlock risk of multiple independent locks.
+/// Sharded by key hash into independent, separately-locked partitions, so
+/// concurrent callers touching different keys (e.g. concurrent prediction
+/// requests keyed by distinct input hashes) don't contend on the same lock.
+/// Eviction is exact LRU *within* a shard, not globally across the whole
+/// cache — the standard trade every high-throughput concurrent cache makes
+/// (Caffeine, Moka, memcached's slab classes), which doesn't matter for a
+/// performance-only cache like this one.
+///
+/// Shard count scales with capacity (see `SHARD_TARGET_ENTRIES`,
+/// `MAX_SHARDS`) and collapses to a single shard for small caches, which
+/// keeps small-cache behavior — including exact global LRU order — identical
+/// to the original unsharded design.
 pub struct LruTtlCache<K, V>
 where
     K: Eq + Hash + Clone,
     V: Clone,
 {
-    /// Maximum cache size
-    max_size: usize,
     /// Time-to-live for entries
     ttl: Duration,
-    /// All mutable state under one lock
-    inner: RwLock<CacheInner<K, V>>,
+    /// Independent, separately-locked partitions of the cache
+    shards: Vec<RwLock<CacheInner<K, V>>>,
     /// Statistics (lock-free atomics for hot-path counters)
     hits: AtomicU64,
     misses: AtomicU64,
@@ -203,18 +222,32 @@ where
 {
     /// Create a new LRU-TTL cache
     pub fn new(max_size: usize, ttl_seconds: u64) -> Self {
+        let num_shards = (max_size / SHARD_TARGET_ENTRIES).clamp(1, MAX_SHARDS);
+        let shard_max_size = max_size.div_ceil(num_shards);
+        let shards = (0..num_shards)
+            .map(|_| RwLock::new(CacheInner::new(shard_max_size)))
+            .collect();
+
         Self {
-            max_size,
             ttl: Duration::from_secs(ttl_seconds),
-            inner: RwLock::new(CacheInner::new(max_size)),
+            shards,
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
         }
     }
 
+    /// Which shard a key belongs to. Stable for the cache's lifetime since
+    /// the shard count never changes after construction.
+    fn shard_for(&self, key: &K) -> &RwLock<CacheInner<K, V>> {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        let idx = (hasher.finish() as usize) % self.shards.len();
+        &self.shards[idx]
+    }
+
     /// Get an entry from the cache
     pub fn get(&self, key: &K) -> Option<V> {
-        let mut inner = self.inner.write().ok()?;
+        let mut inner = self.shard_for(key).write().ok()?;
 
         if let Some((node_idx, entry)) = inner.cache.get(key) {
             if entry.is_expired(self.ttl) {
@@ -248,7 +281,7 @@ where
 
     /// Set an entry in the cache
     pub fn set(&self, key: K, value: V) {
-        let mut inner = match self.inner.write() {
+        let mut inner = match self.shard_for(&key).write() {
             Ok(g) => g,
             Err(_) => return,
         };
@@ -262,8 +295,8 @@ where
             return;
         }
 
-        // If at capacity, evict LRU entry
-        if inner.cache.len() >= self.max_size {
+        // If this shard is at capacity, evict its LRU entry
+        if inner.cache.len() >= inner.max_size {
             inner.evict_lru();
         }
 
@@ -276,13 +309,14 @@ where
 
     /// Remove an entry from the cache
     pub fn remove(&self, key: &K) -> Option<V> {
-        let mut inner = self.inner.write().ok()?;
+        let mut inner = self.shard_for(key).write().ok()?;
         inner.remove_entry(key)
     }
 
     /// Check if a key exists in the cache and has not expired
     pub fn contains(&self, key: &K) -> bool {
-        self.inner.read()
+        self.shard_for(key)
+            .read()
             .map(|g| {
                 g.cache.get(key)
                     .map(|(_, entry)| !entry.is_expired(self.ttl))
@@ -291,9 +325,12 @@ where
             .unwrap_or(false)
     }
 
-    /// Get the current cache size
+    /// Get the current cache size (summed across all shards)
     pub fn len(&self) -> usize {
-        self.inner.read().map(|g| g.cache.len()).unwrap_or(0)
+        self.shards
+            .iter()
+            .map(|s| s.read().map(|g| g.cache.len()).unwrap_or(0))
+            .sum()
     }
 
     /// Check if the cache is empty
@@ -303,12 +340,14 @@ where
 
     /// Clear the cache
     pub fn clear(&self) {
-        if let Ok(mut inner) = self.inner.write() {
-            inner.cache.clear();
-            inner.lru_list.clear();
-            inner.head = None;
-            inner.tail = None;
-            inner.free_list.clear();
+        for shard in &self.shards {
+            if let Ok(mut inner) = shard.write() {
+                inner.cache.clear();
+                inner.lru_list.clear();
+                inner.head = None;
+                inner.tail = None;
+                inner.free_list.clear();
+            }
         }
     }
 
@@ -325,23 +364,28 @@ where
         (hits, misses, hit_rate)
     }
 
-    /// Prune expired entries
+    /// Prune expired entries (across all shards)
     pub fn prune_expired(&self) -> usize {
-        let mut inner = match self.inner.write() {
-            Ok(g) => g,
-            Err(_) => return 0,
-        };
-
         let ttl = self.ttl;
-        let keys_to_remove: Vec<K> = inner.cache.iter()
-            .filter(|(_, (_, entry))| entry.is_expired(ttl))
-            .map(|(k, _)| k.clone())
-            .collect();
+        let mut count = 0;
 
-        let count = keys_to_remove.len();
-        for key in keys_to_remove {
-            inner.remove_entry(&key);
+        for shard in &self.shards {
+            let mut inner = match shard.write() {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+
+            let keys_to_remove: Vec<K> = inner.cache.iter()
+                .filter(|(_, (_, entry))| entry.is_expired(ttl))
+                .map(|(k, _)| k.clone())
+                .collect();
+
+            count += keys_to_remove.len();
+            for key in keys_to_remove {
+                inner.remove_entry(&key);
+            }
         }
+
         count
     }
 }
@@ -349,6 +393,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::thread;
 
     #[test]
@@ -366,6 +411,9 @@ mod tests {
 
     #[test]
     fn test_lru_eviction() {
+        // Capacity 3 stays a single shard (below SHARD_TARGET_ENTRIES), so
+        // eviction order is exact global LRU, identical to the pre-sharding
+        // design.
         let cache: LruTtlCache<String, i32> = LruTtlCache::new(3, 60);
 
         cache.set("a".to_string(), 1);
@@ -410,5 +458,67 @@ mod tests {
         assert_eq!(hits, 2);
         assert_eq!(misses, 1);
         assert!((hit_rate - 0.666).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_sharded_cache_stores_and_retrieves_all_keys() {
+        // Capacity well above SHARD_TARGET_ENTRIES so this actually spans
+        // multiple shards; every key must still round-trip correctly
+        // regardless of which shard it hashes into.
+        let cache: LruTtlCache<usize, usize> = LruTtlCache::new(1000, 60);
+
+        for i in 0..500 {
+            cache.set(i, i * 10);
+        }
+        for i in 0..500 {
+            assert_eq!(cache.get(&i), Some(i * 10), "key {i} did not round-trip");
+        }
+        assert_eq!(cache.len(), 500);
+
+        cache.remove(&250);
+        assert_eq!(cache.get(&250), None);
+        assert_eq!(cache.len(), 499);
+    }
+
+    #[test]
+    fn test_sharded_cache_concurrent_access() {
+        let cache: Arc<LruTtlCache<usize, usize>> = Arc::new(LruTtlCache::new(2000, 60));
+        let mut handles = Vec::new();
+
+        for t in 0..8 {
+            let cache = Arc::clone(&cache);
+            handles.push(thread::spawn(move || {
+                for i in 0..200 {
+                    let key = t * 200 + i;
+                    cache.set(key, key * 2);
+                    assert_eq!(cache.get(&key), Some(key * 2));
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Every key was distinct across threads and within total capacity,
+        // so nothing should have been evicted.
+        assert_eq!(cache.len(), 1600);
+    }
+
+    #[test]
+    fn test_sharded_cache_respects_approximate_capacity() {
+        // Total capacity is spread across shards (ceil-divided), so it may
+        // overshoot slightly, but must never grow unbounded.
+        let cache: LruTtlCache<usize, usize> = LruTtlCache::new(500, 60);
+
+        for i in 0..5000 {
+            cache.set(i, i);
+        }
+
+        assert!(
+            cache.len() <= 500 + MAX_SHARDS,
+            "sharded cache grew far beyond its configured capacity: len={}",
+            cache.len()
+        );
     }
 }
