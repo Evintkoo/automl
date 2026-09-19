@@ -1,62 +1,102 @@
 {
   "status": "done",
+  "title": "Kolosal AutoML",
+  "description": "A single-crate Rust AutoML framework covering data prep, model search, trust/quality tooling, and serving in one binary.",
   "nodes": {
     "preprocessing-scaling": {
-      "status": "done"
+      "status": "done",
+      "title": "Preprocessing & Scaling",
+      "description": "Standard/MinMax/Robust scalers, OneHot/Label/Target/Hash encoders, and Log/Power/Box-Cox/Yeo-Johnson transformers."
     },
     "missing-value-imputation": {
-      "status": "done"
+      "status": "done",
+      "title": "Missing Value Imputation",
+      "description": "Mean/median/mode/forward-fill plus MICE, KNN, and iterative imputers fill gaps before training."
     },
     "feature-engineering": {
-      "status": "done"
+      "status": "done",
+      "title": "Feature Engineering",
+      "description": "Generates polynomial features, pairwise interactions, and TF-IDF vectors to expand the feature space automatically."
     },
     "synthetic-data-balancing": {
-      "status": "done"
+      "status": "done",
+      "title": "Synthetic Data Balancing",
+      "description": "SMOTE, ADASYN, and random oversampling correct class imbalance, with a recently re-optimized neighbor search."
     },
     "time-series-utilities": {
-      "status": "done"
+      "status": "done",
+      "title": "Time Series Utilities",
+      "description": "Time-series-specific feature extraction, differencing, and time-aware cross-validation splitting."
     },
     "multi-model-training-engine": {
-      "status": "done"
+      "status": "done",
+      "title": "Multi-Model Training Engine",
+      "description": "Trains and cross-validates 17+ algorithms (linear/logistic regression, decision trees, random forest, SVM, etc.) behind one unified interface."
     },
     "hyperoptx-hyperparameter-search": {
-      "status": "done"
+      "status": "done",
+      "title": "HyperOptX Hyperparameter Search",
+      "description": "Bayesian (Gaussian-process/TPE), random, and grid samplers with median/percentile/Hyperband pruners."
     },
     "autopipeline-construction": {
-      "status": "done"
+      "status": "done",
+      "title": "AutoPipeline Construction",
+      "description": "Auto-detects column/data types and assembles a preprocessing-to-training pipeline without manual configuration."
     },
     "ensemble-methods": {
-      "status": "done"
+      "status": "done",
+      "title": "Ensemble Methods",
+      "description": "Voting and stacking ensembles combine multiple trained models into one predictor."
     },
     "neural-architecture-search": {
-      "status": "testing"
+      "status": "testing",
+      "title": "Neural Architecture Search",
+      "description": "DARTS-style differentiable search plus TabNet/FT-Transformer architectures, hand-implemented over ndarray with no autodiff crate."
     },
     "explainability": {
-      "status": "done"
+      "status": "done",
+      "title": "Explainability",
+      "description": "Permutation importance, partial dependence (1D/2D/ICE), and a kernel-SHAP-like local explainer for per-prediction attributions."
     },
     "probability-calibration": {
-      "status": "done"
+      "status": "done",
+      "title": "Probability Calibration",
+      "description": "Platt scaling, isotonic regression, temperature scaling, and beta calibration, with ECE/MCE/Brier-score reporting."
     },
     "drift-detection": {
-      "status": "done"
+      "status": "done",
+      "title": "Drift Detection",
+      "description": "KS-test/PSI/Jensen-Shannon distributional checks plus online detectors (DDM, ADWIN, Page-Hinkley, EDDM)."
     },
     "anomaly-detection": {
-      "status": "done"
+      "status": "done",
+      "title": "Anomaly Detection",
+      "description": "Isolation Forest and Local Outlier Factor detect outliers, both backed by a KD-tree neighbor search."
     },
     "pipeline-quality-gates": {
-      "status": "done"
+      "status": "done",
+      "title": "Pipeline Quality Gates",
+      "description": "A four-gate quality pipeline (pre-training, training, hyperopt convergence, post-training calibration/OOD) backed by a dedicated integration test suite."
     },
     "web-dashboard-cli": {
-      "status": "done"
+      "status": "done",
+      "title": "Web Dashboard & CLI",
+      "description": "An Axum-served htmx+Alpine dashboard (upload, configure, train, monitor) and a CLI (train/predict/preprocess/benchmark/serve) share one binary."
     },
     "inference-model-export": {
-      "status": "done"
+      "status": "done",
+      "title": "Inference & Model Export",
+      "description": "A batching/caching inference engine plus ONNX/PMML export, a model registry, and versioning."
     },
     "security-access-control": {
-      "status": "done"
+      "status": "done",
+      "title": "Security & Access Control",
+      "description": "API key/JWT auth, sliding-window rate limiting, RBAC roles, and input-validation middleware."
     },
     "iso-compliance-suite": {
-      "status": "in-progress"
+      "status": "in-progress",
+      "title": "ISO Compliance Suite",
+      "description": "Fairness/bias scanning, PII detection, data-lineage/provenance tracking, and compliance reporting toward ISO 42001/27701/TR 24027."
     }
   }
 }
