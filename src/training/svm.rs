@@ -217,11 +217,16 @@ impl SVMClassifier {
             return self.smo_train_subsampled(x, y);
         }
 
-        let mut alphas = Array1::zeros(n);
+        let mut alphas: Array1<f64> = Array1::zeros(n);
         let mut bias = 0.0;
 
         // Precompute kernel matrix for efficiency
         let kernel_matrix = self.compute_kernel_matrix(x);
+
+        // Error cache: E(k) = decision_function(k) - y[k], maintained incrementally
+        // instead of recomputed from scratch (an O(n) dot product) on every single
+        // KKT check. With alphas=0 and bias=0, decision_function(k) = 0 for all k.
+        let mut error_cache: Vec<f64> = y.iter().map(|&yk| -yk).collect();
 
         let mut rng = match self.config.random_state {
             Some(seed) => Xoshiro256PlusPlus::seed_from_u64(seed),
@@ -241,7 +246,7 @@ impl SVMClassifier {
 
             for i in 0..n {
                 // Calculate error for i
-                let e_i = self.decision_function_cached(&kernel_matrix, &alphas, y, bias, i) - y[i];
+                let e_i = error_cache[i];
 
                 // Check KKT conditions
                 if (y[i] * e_i < -self.config.tol && alphas[i] < self.config.c)
@@ -252,12 +257,12 @@ impl SVMClassifier {
                         let j = rng.gen_range(0..n);
                         if j != i { break j; }
                     };
-                    
-                    let e_j = self.decision_function_cached(&kernel_matrix, &alphas, y, bias, j) - y[j];
-                    
+
+                    let e_j = error_cache[j];
+
                     let alpha_i_old = alphas[i];
                     let alpha_j_old = alphas[j];
-                    
+
                     // Compute bounds
                     let (l, h) = if y[i] != y[j] {
                         (
@@ -270,38 +275,39 @@ impl SVMClassifier {
                             (alphas[i] + alphas[j]).min(self.config.c)
                         )
                     };
-                    
+
                     if (l - h).abs() < 1e-10 {
                         continue;
                     }
-                    
+
                     // Compute eta
                     let eta = 2.0 * kernel_matrix[[i, j]] - kernel_matrix[[i, i]] - kernel_matrix[[j, j]];
-                    
+
                     if eta >= 0.0 {
                         continue;
                     }
-                    
+
                     // Update alpha_j
                     alphas[j] = alphas[j] - y[j] * (e_i - e_j) / eta;
                     alphas[j] = alphas[j].max(l).min(h);
-                    
+
                     if (alphas[j] - alpha_j_old).abs() < 1e-5 {
                         continue;
                     }
-                    
+
                     // Update alpha_i
                     alphas[i] = alphas[i] + y[i] * y[j] * (alpha_j_old - alphas[j]);
-                    
+
                     // Update bias
                     let b1 = bias - e_i
                         - y[i] * (alphas[i] - alpha_i_old) * kernel_matrix[[i, i]]
                         - y[j] * (alphas[j] - alpha_j_old) * kernel_matrix[[i, j]];
-                    
+
                     let b2 = bias - e_j
                         - y[i] * (alphas[i] - alpha_i_old) * kernel_matrix[[i, j]]
                         - y[j] * (alphas[j] - alpha_j_old) * kernel_matrix[[j, j]];
-                    
+
+                    let bias_old = bias;
                     bias = if alphas[i] > 0.0 && alphas[i] < self.config.c {
                         b1
                     } else if alphas[j] > 0.0 && alphas[j] < self.config.c {
@@ -309,11 +315,22 @@ impl SVMClassifier {
                     } else {
                         (b1 + b2) / 2.0
                     };
-                    
+
+                    // Propagate the (alpha_i, alpha_j, bias) delta to every cached
+                    // error term rather than recomputing each from scratch.
+                    let delta_i = y[i] * (alphas[i] - alpha_i_old);
+                    let delta_j = y[j] * (alphas[j] - alpha_j_old);
+                    let delta_bias = bias - bias_old;
+                    for k in 0..n {
+                        error_cache[k] += delta_i * kernel_matrix[[i, k]]
+                            + delta_j * kernel_matrix[[j, k]]
+                            + delta_bias;
+                    }
+
                     num_changed += 1;
                 }
             }
-            
+
             total_iter += 1;
             if num_changed == 0 {
                 passes += 1;
@@ -321,7 +338,7 @@ impl SVMClassifier {
                 passes = 0;
             }
         }
-        
+
         // Find support vectors (alpha > 0)
         let support_indices: Vec<usize> = alphas
             .iter()
@@ -329,7 +346,7 @@ impl SVMClassifier {
             .filter(|(_, &a)| a > 1e-8)
             .map(|(i, _)| i)
             .collect();
-        
+
         Ok((alphas, bias, support_indices))
     }
 
@@ -366,12 +383,16 @@ impl SVMClassifier {
         // Train on subsample using the standard SMO (guaranteed k <= MAX_KERNEL_MATRIX_SAMPLES)
         let kernel_matrix = self.compute_kernel_matrix(&x_sub);
 
-        let mut alphas = Array1::zeros(k);
+        let mut alphas: Array1<f64> = Array1::zeros(k);
         let mut bias = 0.0;
         let mut rng2 = match self.config.random_state {
             Some(seed) => Xoshiro256PlusPlus::seed_from_u64(seed.wrapping_add(1)),
             None => Xoshiro256PlusPlus::from_entropy(),
         };
+
+        // Same incremental error-cache maintenance as smo_train, keyed on the
+        // subsampled indices (0..k).
+        let mut error_cache: Vec<f64> = y_sub.iter().map(|&yk| -yk).collect();
 
         let mut passes = 0;
         let max_passes = 5;
@@ -382,7 +403,7 @@ impl SVMClassifier {
             if k <= 1 { break; }
 
             for i in 0..k {
-                let e_i = self.decision_function_cached(&kernel_matrix, &alphas, &y_sub, bias, i) - y_sub[i];
+                let e_i = error_cache[i];
 
                 if (y_sub[i] * e_i < -self.config.tol && alphas[i] < self.config.c)
                     || (y_sub[i] * e_i > self.config.tol && alphas[i] > 0.0)
@@ -392,7 +413,7 @@ impl SVMClassifier {
                         if j != i { break j; }
                     };
 
-                    let e_j = self.decision_function_cached(&kernel_matrix, &alphas, &y_sub, bias, j) - y_sub[j];
+                    let e_j = error_cache[j];
                     let alpha_i_old = alphas[i];
                     let alpha_j_old = alphas[j];
 
@@ -418,9 +439,19 @@ impl SVMClassifier {
                         - y_sub[i] * (alphas[i] - alpha_i_old) * kernel_matrix[[i, j]]
                         - y_sub[j] * (alphas[j] - alpha_j_old) * kernel_matrix[[j, j]];
 
+                    let bias_old = bias;
                     bias = if alphas[i] > 0.0 && alphas[i] < self.config.c { b1 }
                         else if alphas[j] > 0.0 && alphas[j] < self.config.c { b2 }
                         else { (b1 + b2) / 2.0 };
+
+                    let delta_i = y_sub[i] * (alphas[i] - alpha_i_old);
+                    let delta_j = y_sub[j] * (alphas[j] - alpha_j_old);
+                    let delta_bias = bias - bias_old;
+                    for kk in 0..k {
+                        error_cache[kk] += delta_i * kernel_matrix[[i, kk]]
+                            + delta_j * kernel_matrix[[j, kk]]
+                            + delta_bias;
+                    }
 
                     num_changed += 1;
                 }
@@ -523,22 +554,6 @@ impl SVMClassifier {
                 (*gamma * x1.dot(&x2) + coef0).tanh()
             }
         }
-    }
-
-    /// Decision function using cached kernel matrix
-    fn decision_function_cached(
-        &self,
-        k: &Array2<f64>,
-        alphas: &Array1<f64>,
-        y: &Array1<f64>,
-        bias: f64,
-        idx: usize,
-    ) -> f64 {
-        let mut sum = 0.0;
-        for i in 0..alphas.len() {
-            sum += alphas[i] * y[i] * k[[i, idx]];
-        }
-        sum + bias
     }
 
     /// Compute the decision function score for a single sample using given SVM parameters
@@ -1037,6 +1052,266 @@ mod tests {
         for (pred, actual) in predictions.iter().zip(y.iter()) {
             let error = (pred - actual).abs() / actual;
             assert!(error < 0.5, "Error {} too large for pred={}, actual={}", error, pred, actual);
+        }
+    }
+}
+
+/// Compares the incremental error-cache `smo_train` against the original
+/// full-recompute reference implementation on solution *quality* (SVM dual
+/// objective + held-out accuracy) rather than requiring bit-identical output.
+/// SMO is a heuristic iterative optimizer with randomized pair selection and
+/// no single "correct" solution path, so a differing-but-not-worse result is
+/// the right bar here, not exact equality.
+#[cfg(test)]
+mod smo_quality_comparison {
+    use super::*;
+
+    // Verbatim copy of the pre-error-cache smo_train, kept only as a reference.
+    fn reference_smo_train(
+        svm: &SVMClassifier,
+        x: &Array2<f64>,
+        y: &Array1<f64>,
+    ) -> (Array1<f64>, f64, Vec<usize>) {
+        fn decision_function_cached(
+            k: &Array2<f64>,
+            alphas: &Array1<f64>,
+            y: &Array1<f64>,
+            bias: f64,
+            idx: usize,
+        ) -> f64 {
+            let mut sum = 0.0;
+            for i in 0..alphas.len() {
+                sum += alphas[i] * y[i] * k[[i, idx]];
+            }
+            sum + bias
+        }
+
+        let n = x.nrows();
+        let mut alphas: Array1<f64> = Array1::zeros(n);
+        let mut bias = 0.0;
+        let kernel_matrix = svm.compute_kernel_matrix(x);
+        let config = &svm.config;
+
+        let mut rng = match config.random_state {
+            Some(seed) => Xoshiro256PlusPlus::seed_from_u64(seed),
+            None => Xoshiro256PlusPlus::from_entropy(),
+        };
+
+        let mut passes = 0;
+        let max_passes = 5;
+        let mut total_iter = 0;
+
+        while passes < max_passes && total_iter < config.max_iter {
+            let mut num_changed = 0;
+            if n <= 1 {
+                break;
+            }
+
+            for i in 0..n {
+                let e_i = decision_function_cached(&kernel_matrix, &alphas, y, bias, i) - y[i];
+
+                if (y[i] * e_i < -config.tol && alphas[i] < config.c)
+                    || (y[i] * e_i > config.tol && alphas[i] > 0.0)
+                {
+                    let j = loop {
+                        let j = rng.gen_range(0..n);
+                        if j != i {
+                            break j;
+                        }
+                    };
+
+                    let e_j = decision_function_cached(&kernel_matrix, &alphas, y, bias, j) - y[j];
+                    let alpha_i_old = alphas[i];
+                    let alpha_j_old = alphas[j];
+
+                    let (l, h) = if y[i] != y[j] {
+                        ((alphas[j] - alphas[i]).max(0.0), (config.c + alphas[j] - alphas[i]).min(config.c))
+                    } else {
+                        ((alphas[i] + alphas[j] - config.c).max(0.0), (alphas[i] + alphas[j]).min(config.c))
+                    };
+
+                    if (l - h).abs() < 1e-10 {
+                        continue;
+                    }
+
+                    let eta = 2.0 * kernel_matrix[[i, j]] - kernel_matrix[[i, i]] - kernel_matrix[[j, j]];
+                    if eta >= 0.0 {
+                        continue;
+                    }
+
+                    alphas[j] = (alphas[j] - y[j] * (e_i - e_j) / eta).max(l).min(h);
+                    if (alphas[j] - alpha_j_old).abs() < 1e-5 {
+                        continue;
+                    }
+                    alphas[i] = alphas[i] + y[i] * y[j] * (alpha_j_old - alphas[j]);
+
+                    let b1 = bias - e_i
+                        - y[i] * (alphas[i] - alpha_i_old) * kernel_matrix[[i, i]]
+                        - y[j] * (alphas[j] - alpha_j_old) * kernel_matrix[[i, j]];
+                    let b2 = bias - e_j
+                        - y[i] * (alphas[i] - alpha_i_old) * kernel_matrix[[i, j]]
+                        - y[j] * (alphas[j] - alpha_j_old) * kernel_matrix[[j, j]];
+
+                    bias = if alphas[i] > 0.0 && alphas[i] < config.c {
+                        b1
+                    } else if alphas[j] > 0.0 && alphas[j] < config.c {
+                        b2
+                    } else {
+                        (b1 + b2) / 2.0
+                    };
+
+                    num_changed += 1;
+                }
+            }
+
+            total_iter += 1;
+            if num_changed == 0 {
+                passes += 1;
+            } else {
+                passes = 0;
+            }
+        }
+
+        let support_indices: Vec<usize> = alphas
+            .iter()
+            .enumerate()
+            .filter(|(_, &a)| a > 1e-8)
+            .map(|(i, _)| i)
+            .collect();
+
+        (alphas, bias, support_indices)
+    }
+
+    /// SVM dual objective: sum(alpha_i) - 0.5 * sum_i sum_j alpha_i alpha_j y_i y_j K(i,j).
+    /// This is exactly the quantity SMO is trying to maximize, so it's the
+    /// principled way to compare two candidate solutions' quality.
+    fn dual_objective(alphas: &Array1<f64>, y: &Array1<f64>, kernel_matrix: &Array2<f64>) -> f64 {
+        let n = alphas.len();
+        let sum_alpha: f64 = alphas.iter().sum();
+        let mut quad = 0.0;
+        for i in 0..n {
+            if alphas[i] == 0.0 {
+                continue;
+            }
+            for j in 0..n {
+                if alphas[j] == 0.0 {
+                    continue;
+                }
+                quad += alphas[i] * alphas[j] * y[i] * y[j] * kernel_matrix[[i, j]];
+            }
+        }
+        sum_alpha - 0.5 * quad
+    }
+
+    fn accuracy(
+        alphas: &Array1<f64>,
+        bias: f64,
+        train_x: &Array2<f64>,
+        train_y: &Array1<f64>,
+        eval_x: &Array2<f64>,
+        eval_y: &Array1<f64>,
+        svm: &SVMClassifier,
+    ) -> f64 {
+        let n_eval = eval_x.nrows();
+        let mut correct = 0usize;
+        for e in 0..n_eval {
+            let mut score = bias;
+            for i in 0..train_x.nrows() {
+                if alphas[i] == 0.0 {
+                    continue;
+                }
+                score += alphas[i] * train_y[i] * svm.kernel(eval_x.row(e), train_x.row(i));
+            }
+            let pred = if score >= 0.0 { 1.0 } else { -1.0 };
+            if pred == eval_y[e] {
+                correct += 1;
+            }
+        }
+        correct as f64 / n_eval as f64
+    }
+
+    // Small dependency-free xorshift64 PRNG for deterministic stress data.
+    struct Xorshift64(u64);
+    impl Xorshift64 {
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn next_f64(&mut self) -> f64 {
+            (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+        }
+    }
+
+    fn make_data(n: usize, dims: usize, seed: u64) -> (Array2<f64>, Array1<f64>) {
+        let mut rng = Xorshift64(seed | 1);
+        // Two separated-but-overlapping blobs so SMO has nontrivial work to do
+        // (KKT violations, bounded alphas, a genuine margin to find).
+        let mut flat = Vec::with_capacity(n * dims);
+        let mut labels = Vec::with_capacity(n);
+        for i in 0..n {
+            let label = if i % 2 == 0 { -1.0 } else { 1.0 };
+            let center = if label < 0.0 { -1.0 } else { 1.0 };
+            for _ in 0..dims {
+                flat.push(center + (rng.next_f64() - 0.5) * 3.0);
+            }
+            labels.push(label);
+        }
+        (
+            Array2::from_shape_vec((n, dims), flat).unwrap(),
+            Array1::from_vec(labels),
+        )
+    }
+
+    #[test]
+    fn error_cache_quality_not_worse_than_reference() {
+        for &(n_train, n_test, dims, ref kernel, seed) in &[
+            (60usize, 40usize, 2usize, KernelType::Linear, 1u64),
+            (80, 40, 3, KernelType::RBF { gamma: 0.5 }, 2),
+            (50, 30, 4, KernelType::Polynomial { degree: 2, gamma: 1.0, coef0: 1.0 }, 3),
+            (100, 50, 2, KernelType::RBF { gamma: 0.3 }, 4),
+        ] {
+            let (train_x, train_y) = make_data(n_train, dims, seed);
+            let (test_x, test_y) = make_data(n_test, dims, seed.wrapping_add(1000));
+
+            let config = SVMConfig {
+                c: 1.0,
+                kernel: kernel.clone(),
+                max_iter: 300,
+                random_state: Some(seed),
+                ..Default::default()
+            };
+            let svm = SVMClassifier::new(config);
+
+            let (ref_alphas, ref_bias, _) = reference_smo_train(&svm, &train_x, &train_y);
+            let (got_alphas, got_bias, _) = svm.smo_train(&train_x, &train_y).unwrap();
+
+            let kernel_matrix = svm.compute_kernel_matrix(&train_x);
+            let ref_obj = dual_objective(&ref_alphas, &train_y, &kernel_matrix);
+            let got_obj = dual_objective(&got_alphas, &train_y, &kernel_matrix);
+
+            let ref_acc = accuracy(&ref_alphas, ref_bias, &train_x, &train_y, &test_x, &test_y, &svm);
+            let got_acc = accuracy(&got_alphas, got_bias, &train_x, &train_y, &test_x, &test_y, &svm);
+
+            println!(
+                "n={n_train} dims={dims} seed={seed}: dual_obj ref={ref_obj:.6} got={got_obj:.6} | test_acc ref={ref_acc:.3} got={got_acc:.3}"
+            );
+
+            // The error-cache version must not converge to a meaningfully worse
+            // dual objective (allow a small tolerance for the two solutions
+            // landing in different-but-comparable KKT-satisfying points) and
+            // must not meaningfully hurt held-out accuracy.
+            assert!(
+                got_obj > ref_obj - 1.0,
+                "error-cache dual objective regressed for n={n_train} dims={dims} seed={seed}: ref={ref_obj} got={got_obj}"
+            );
+            assert!(
+                got_acc >= ref_acc - 0.15,
+                "error-cache accuracy regressed for n={n_train} dims={dims} seed={seed}: ref={ref_acc} got={got_acc}"
+            );
         }
     }
 }
