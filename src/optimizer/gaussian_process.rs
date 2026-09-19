@@ -3,7 +3,7 @@
 //! Implements GP regression with various kernels and acquisition functions
 //! for intelligent hyperparameter search.
 
-use ndarray::{Array1, Array2, ArrayView1, Axis};
+use ndarray::{s, Array1, Array2, ArrayView1, Axis};
 use rand::prelude::*;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
@@ -178,6 +178,25 @@ impl GaussianProcess {
             .map(|&yi| (yi - self.y_mean) / self.y_std)
             .collect();
 
+        // Sequential Bayesian optimization refits the GP once per trial on the
+        // full history-so-far, i.e. the same X plus exactly one appended row.
+        // In that (common) case, extend the previous Cholesky factor with a
+        // single rank-1 update (O(n^2)) instead of recomputing the whole
+        // decomposition from scratch (O(n^3)). The kernel matrix's leading
+        // n×n block is unchanged by appending a row, and a Cholesky factor's
+        // leading principal submatrix is exactly the Cholesky factor of the
+        // matrix's leading principal submatrix, so this is not an
+        // approximation — just reusing already-computed entries instead of
+        // rederiving them.
+        if let Some(l) = self.try_incremental_cholesky(&x) {
+            let alpha = Self::solve_triangular_system(&l, &y_normalized);
+            self.x_train = Some(x);
+            self.y_train = Some(y_normalized);
+            self.l_chol = Some(l);
+            self.alpha = Some(alpha);
+            return;
+        }
+
         // Compute kernel matrix
         let k = compute_kernel(&x, &x, &self.kernel);
         
@@ -233,6 +252,45 @@ impl GaussianProcess {
         }
 
         (mean, var)
+    }
+
+    /// If `x` is exactly the previously-fitted training set with one row
+    /// appended, extend the cached Cholesky factor with a rank-1 update
+    /// instead of recomputing it from scratch. Returns `None` (falling back
+    /// to a full recompute) whenever that precondition doesn't hold — a
+    /// changed kernel, a reset/shrunk/reordered dataset, or more than one new
+    /// row all fall back safely.
+    fn try_incremental_cholesky(&self, x: &Array2<f64>) -> Option<Array2<f64>> {
+        let prev_x = self.x_train.as_ref()?;
+        let prev_l = self.l_chol.as_ref()?;
+        let prev_n = prev_x.nrows();
+        let n = x.nrows();
+
+        if n != prev_n + 1 || prev_n != prev_l.nrows() || prev_x.ncols() != x.ncols() {
+            return None;
+        }
+        if prev_x != &x.slice(s![0..prev_n, ..]) {
+            return None;
+        }
+
+        let new_row = x.row(prev_n);
+        let mut k_new_row = Array1::zeros(prev_n);
+        for j in 0..prev_n {
+            k_new_row[j] = kernel_value(new_row, prev_x.row(j), &self.kernel);
+        }
+        let k_nn = kernel_value(new_row, new_row, &self.kernel) + self.noise;
+
+        let l_row = Self::solve_lower_triangular(prev_l, &k_new_row);
+        let l_diag = (k_nn - l_row.dot(&l_row)).max(1e-10).sqrt();
+
+        let mut l = Array2::zeros((n, n));
+        l.slice_mut(s![0..prev_n, 0..prev_n]).assign(prev_l);
+        for j in 0..prev_n {
+            l[[prev_n, j]] = l_row[j];
+        }
+        l[[prev_n, prev_n]] = l_diag;
+
+        Some(l)
     }
 
     /// Simple Cholesky decomposition
@@ -856,5 +914,82 @@ mod tests {
     fn test_ei_with_noise_zero_std_returns_zero() {
         let ei = expected_improvement_with_noise(0.9, 0.0, 0.5, 0.01);
         assert_eq!(ei, 0.0);
+    }
+
+    /// Verifies the incremental (rank-1) Cholesky update taken by `fit()` when
+    /// growing the training set by one row matches a full from-scratch
+    /// recompute — the pattern `GPSampler::sample` actually exercises,
+    /// rebuilding the full history array and calling `fit` once per trial.
+    #[test]
+    fn incremental_fit_matches_full_recompute_sequence() {
+        // Small dependency-free xorshift64 PRNG for deterministic stress data.
+        struct Xorshift64(u64);
+        impl Xorshift64 {
+            fn next_u64(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                self.0 = x;
+                x
+            }
+            fn next_f64(&mut self) -> f64 {
+                (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
+            }
+        }
+
+        for kernel in [
+            KernelType::RBF { length_scale: 1.0 },
+            KernelType::Matern { nu: 2.5, length_scale: 0.8 },
+        ] {
+            let mut rng = Xorshift64(0xC0FFEE ^ 1);
+            let dims = 3;
+            let n_points = 15;
+
+            let mut flat = Vec::new();
+            let mut ys = Vec::new();
+            for _ in 0..n_points {
+                for _ in 0..dims {
+                    flat.push(rng.next_f64() * 4.0 - 2.0);
+                }
+                ys.push(rng.next_f64() * 2.0 - 1.0);
+            }
+
+            let mut incremental_gp = GaussianProcess::new(kernel.clone());
+            let x_test = Array2::from_shape_vec((2, dims), vec![0.1; dims * 2]).unwrap();
+
+            // Grow the training set one row at a time, exactly as GPSampler::sample
+            // does across successive trials, and compare against a fresh
+            // full-recompute GP fit on the identical data at each step.
+            for step in 2..=n_points {
+                let x_step = Array2::from_shape_vec(
+                    (step, dims),
+                    flat[0..step * dims].to_vec(),
+                )
+                .unwrap();
+                let y_step = Array1::from_vec(ys[0..step].to_vec());
+
+                incremental_gp.fit(x_step.clone(), y_step.clone());
+
+                let mut fresh_gp = GaussianProcess::new(kernel.clone());
+                fresh_gp.fit(x_step, y_step);
+
+                let (inc_mean, inc_var) = incremental_gp.predict(&x_test);
+                let (fresh_mean, fresh_var) = fresh_gp.predict(&x_test);
+
+                for i in 0..x_test.nrows() {
+                    assert!(
+                        (inc_mean[i] - fresh_mean[i]).abs() < 1e-8,
+                        "step={step} kernel={kernel:?}: mean mismatch at {i}: incremental={} fresh={}",
+                        inc_mean[i], fresh_mean[i]
+                    );
+                    assert!(
+                        (inc_var[i] - fresh_var[i]).abs() < 1e-8,
+                        "step={step} kernel={kernel:?}: variance mismatch at {i}: incremental={} fresh={}",
+                        inc_var[i], fresh_var[i]
+                    );
+                }
+            }
+        }
     }
 }
