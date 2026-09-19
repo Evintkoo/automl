@@ -1,3 +1,62 @@
 {
-  "status": "done"
+  "status": "done",
+  "nodes": {
+    "preprocessing-scaling": {
+      "status": "done"
+    },
+    "missing-value-imputation": {
+      "status": "done"
+    },
+    "feature-engineering": {
+      "status": "done"
+    },
+    "synthetic-data-balancing": {
+      "status": "done"
+    },
+    "time-series-utilities": {
+      "status": "done"
+    },
+    "multi-model-training-engine": {
+      "status": "done"
+    },
+    "hyperoptx-hyperparameter-search": {
+      "status": "done"
+    },
+    "autopipeline-construction": {
+      "status": "done"
+    },
+    "ensemble-methods": {
+      "status": "done"
+    },
+    "neural-architecture-search": {
+      "status": "testing"
+    },
+    "explainability": {
+      "status": "done"
+    },
+    "probability-calibration": {
+      "status": "done"
+    },
+    "drift-detection": {
+      "status": "done"
+    },
+    "anomaly-detection": {
+      "status": "done"
+    },
+    "pipeline-quality-gates": {
+      "status": "done"
+    },
+    "web-dashboard-cli": {
+      "status": "done"
+    },
+    "inference-model-export": {
+      "status": "done"
+    },
+    "security-access-control": {
+      "status": "done"
+    },
+    "iso-compliance-suite": {
+      "status": "in-progress"
+    }
+  }
 }
