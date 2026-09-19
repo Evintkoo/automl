@@ -179,11 +179,23 @@ impl Sampler for SMOTE {
 
             let k = self.k_neighbors.min(class_samples.len() - 1).max(1);
 
+            // Compute each sample's neighbor list once — used both to
+            // determine viable_indices below and as the neighbor set every
+            // time that index is drawn in the generation loop, instead of
+            // recomputing the same O(m log m) sort from scratch on every
+            // single draw. Source indices are drawn with replacement, so
+            // with n_to_generate typically several times larger than the
+            // minority class size, this was doing the same work many times
+            // over per index.
+            let neighbor_cache: Vec<Vec<usize>> = (0..class_samples.len())
+                .map(|i| self.find_neighbors(&class_samples[i], &class_samples, k))
+                .collect();
+
             // Determine which samples in this class actually have a neighbor
             // (a singleton class, or a sample whose only neighbors are exact
             // duplicates of itself, would otherwise cause an infinite loop below).
             let viable_indices: Vec<usize> = (0..class_samples.len())
-                .filter(|&i| !self.find_neighbors(&class_samples[i], &class_samples, k).is_empty())
+                .filter(|&i| !neighbor_cache[i].is_empty())
                 .collect();
 
             if viable_indices.is_empty() {
@@ -200,8 +212,7 @@ impl Sampler for SMOTE {
                 let idx = viable_indices[rng.gen_range(0..viable_indices.len())];
                 let sample = &class_samples[idx];
 
-                // Find neighbors
-                let neighbors = self.find_neighbors(sample, &class_samples, k);
+                let neighbors = &neighbor_cache[idx];
 
                 // Pick random neighbor
                 let neighbor_idx = neighbors[rng.gen_range(0..neighbors.len())];
@@ -419,15 +430,25 @@ impl Sampler for BorderlineSMOTE {
 
             let k = self.smote.k_neighbors.min(class_samples.len() - 1).max(1);
 
+            // Compute each source sample's within-class neighbor list once —
+            // used both for the viable_source_indices filter below and every
+            // time that index is drawn (with replacement) in the generation
+            // loop, instead of recomputing the same O(m log m) sort from
+            // scratch on every single draw.
+            let neighbor_cache: HashMap<usize, Vec<usize>> = source_indices
+                .iter()
+                .map(|&idx| {
+                    let sample: Vec<f64> = x.row(idx).iter().copied().collect();
+                    (idx, self.smote.find_neighbors(&sample, &class_samples, k))
+                })
+                .collect();
+
             // Determine which source samples actually have a neighbor within the
             // class (a singleton class, or an all-duplicate class, would otherwise
             // cause an infinite loop below).
             let viable_source_indices: Vec<usize> = source_indices.iter()
                 .copied()
-                .filter(|&idx| {
-                    let sample: Vec<f64> = x.row(idx).iter().copied().collect();
-                    !self.smote.find_neighbors(&sample, &class_samples, k).is_empty()
-                })
+                .filter(|idx| !neighbor_cache[idx].is_empty())
                 .collect();
 
             if viable_source_indices.is_empty() {
@@ -447,13 +468,23 @@ impl Sampler for BorderlineSMOTE {
             let n_to_generate_majority = if is_borderline2 { n_to_generate / 2 } else { 0 };
             let n_to_generate_minority = n_to_generate - n_to_generate_majority;
 
+            // Same caching as above, for majority-class neighbors (Borderline2 only).
+            let majority_neighbor_cache: HashMap<usize, Vec<usize>> = if is_borderline2 {
+                source_indices
+                    .iter()
+                    .map(|&idx| (idx, self.majority_neighbors(idx, x, y, k)))
+                    .collect()
+            } else {
+                HashMap::new()
+            };
+
             // Determine which source samples have at least one majority-class
             // (different-class) neighbor, needed only for Borderline2.
             let viable_majority_source_indices: Vec<usize> = if is_borderline2 {
                 source_indices
                     .iter()
                     .copied()
-                    .filter(|&idx| !self.majority_neighbors(idx, x, y, k).is_empty())
+                    .filter(|idx| !majority_neighbor_cache[idx].is_empty())
                     .collect()
             } else {
                 Vec::new()
@@ -464,7 +495,7 @@ impl Sampler for BorderlineSMOTE {
                 let idx = viable_source_indices[rng.gen_range(0..viable_source_indices.len())];
                 let sample: Vec<f64> = x.row(idx).iter().copied().collect();
 
-                let neighbors = self.smote.find_neighbors(&sample, &class_samples, k);
+                let neighbors = &neighbor_cache[&idx];
 
                 let neighbor_idx = neighbors[rng.gen_range(0..neighbors.len())];
                 let neighbor = &class_samples[neighbor_idx];
@@ -483,7 +514,7 @@ impl Sampler for BorderlineSMOTE {
                         [rng.gen_range(0..viable_majority_source_indices.len())];
                     let sample: Vec<f64> = x.row(idx).iter().copied().collect();
 
-                    let maj_neighbors = self.majority_neighbors(idx, x, y, k);
+                    let maj_neighbors = &majority_neighbor_cache[&idx];
                     let neighbor_idx = maj_neighbors[rng.gen_range(0..maj_neighbors.len())];
                     let neighbor: Vec<f64> = x.row(neighbor_idx).iter().copied().collect();
 

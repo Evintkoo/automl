@@ -210,20 +210,26 @@ impl Sampler for ADASYN {
             // Generate synthetic samples
             let mut generated = 0;
             for (i, &n_samples) in samples_per_point.iter().enumerate() {
+                if n_samples == 0 {
+                    continue;
+                }
+
                 let sample = &minority_samples[i];
+                // `sample` (and hence its neighbor set) is fixed for this `i` across the
+                // whole inner loop, so compute it once instead of recomputing the same
+                // O(m log m) sort on every one of the n_samples draws.
+                let neighbors = self.find_neighbors_class(sample, &minority_samples, k_class);
+
+                if neighbors.is_empty() {
+                    continue;
+                }
 
                 for _ in 0..n_samples {
-                    let neighbors = self.find_neighbors_class(sample, &minority_samples, k_class);
-                    
-                    if neighbors.is_empty() {
-                        continue;
-                    }
-
                     let neighbor_idx = neighbors[rng.gen_range(0..neighbors.len())];
                     let neighbor = &minority_samples[neighbor_idx];
 
                     let synthetic = self.generate_sample(sample, neighbor, &mut rng);
-                    
+
                     all_x.push(synthetic);
                     all_y.push(minority_class);
                     generated += 1;
